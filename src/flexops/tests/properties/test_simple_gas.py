@@ -12,6 +12,8 @@ import pyomo.environ as pyo
 import pytest
 from idaes.core import Component, VaporPhase
 from pyomo.environ import units as pyunits
+from pyomo.environ import value
+from pyomo.util.calc_var_value import calculate_variable_from_constraint
 from pyomo.util.check_units import assert_units_consistent, assert_units_equivalent
 
 from flexcore.exceptions import FlexConfigError
@@ -144,3 +146,29 @@ def test_fix_initialization_states(model):
     for var in model.state.define_state_vars().values():
         for vd in var.values():
             assert vd.fixed is True
+
+
+# --- test on-demand properties
+@pytest.mark.unit
+def test_on_demand_properties(model):
+    """A state block builds flow_vol_phase indexed by (time, phase) in m^3/hr."""
+    model.state = model.props.build_state_block(time_index=model.time)
+    flow = model.state.flow_vol_phase
+    flow[0, "Vap"].fix(1)
+    mass_flow = model.state.flow_mass_phase
+    assert set(mass_flow.index_set()) == {(t, "Vap") for t in TIMES}
+    assert_units_equivalent(mass_flow[0, "Vap"], pyunits.kg / pyunits.hr)
+    calculate_variable_from_constraint(
+        mass_flow[0, "Vap"], model.state.eq_flow_mass_phase[0, "Vap"]
+    )
+    assert pytest.approx(value(mass_flow[0, "Vap"]), rel=1e-2) == 1.204
+
+
+@pytest.mark.unit
+def test_wrong_density_units():
+    """A state block builds flow_vol_phase indexed by (time, phase) in m^3/hr."""
+    m = pyo.ConcreteModel()
+    with pytest.raises(TypeError):
+        m.props = SimpleGasFlow(gas_mw=1000)
+    with pytest.raises(TypeError):
+        m.props = SimpleGasFlow(gas_mw=1000 * pyunits.kg / pyunits.m)

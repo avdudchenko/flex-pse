@@ -12,6 +12,7 @@ import pyomo.environ as pyo
 import pytest
 from idaes.core import Component, LiquidPhase
 from pyomo.environ import units as pyunits
+from pyomo.environ import value
 from pyomo.util.check_units import assert_units_consistent, assert_units_equivalent
 
 from flexcore.exceptions import FlexConfigError
@@ -133,18 +134,6 @@ def test_fix_initialization_states(model):
 
 
 # -- package-specific extras: the opt-in intensive states --------------------
-
-
-@pytest.mark.unit
-def test_density_is_not_a_state_variable(model):
-    """``dens_mass`` was removed: it is neither a state var nor a config option."""
-    model.state = model.props.build_state_block(time_index=model.time)
-    assert model.state.find_component("dens_mass") is None
-    assert "dens_mass" not in model.state.define_state_vars()
-    with pytest.raises(ValueError, match="fixed_density"):
-        pyo.ConcreteModel().props = SimpleAqueousFlow(fixed_density=True)
-
-
 @pytest.mark.unit
 def test_get_flow_basis_var_name(model):
     """get_flow_basis_var_name names the extensive flow state variable."""
@@ -169,3 +158,37 @@ def test_optional_pressure_temperature():
     assert_units_equivalent(state_block.pressure[0], pyunits.Pa)
     assert_units_equivalent(state_block.temperature[0], pyunits.K)
     assert_units_consistent(state_block)
+
+
+# --- test on-demand properties
+@pytest.mark.unit
+def test_on_demand_properties(model):
+    """A state block builds flow_vol_phase indexed by (time, phase) in m^3/hr."""
+    model.state = model.props.build_state_block(time_index=model.time)
+    flow = model.state.flow_vol_phase
+    flow[0, "Liq"].fix(1)
+    mass_flow = model.state.flow_mass_phase
+    dens_mass_phase = model.state.dens_mass_phase
+    temp = model.state.temperature
+    pressure = model.state.pressure
+    assert set(mass_flow.index_set()) == {(t, "Liq") for t in TIMES}
+    assert set(dens_mass_phase.index_set()) == {(t, "Liq") for t in TIMES}
+
+    assert set(temp.index_set()) == {t for t in TIMES}
+    assert set(pressure.index_set()) == {t for t in TIMES}
+
+    assert_units_equivalent(mass_flow[0, "Liq"], pyunits.kg / pyunits.hr)
+    assert_units_equivalent(dens_mass_phase[0, "Liq"], pyunits.kg / pyunits.m**3)
+    assert pytest.approx(dens_mass_phase[0, "Liq"].value, rel=1e-6) == 1000
+    assert pytest.approx(value(mass_flow[0, "Liq"]), rel=1e-6) == 1000
+
+
+@pytest.mark.unit
+def test_wrong_density_units():
+    """A state block builds flow_vol_phase indexed by (time, phase) in m^3/hr."""
+    m = pyo.ConcreteModel()
+    m.props = SimpleAqueousFlow()
+    with pytest.raises(TypeError):
+        m.props = SimpleAqueousFlow(density=1000)
+    with pytest.raises(TypeError):
+        m.props = SimpleAqueousFlow(density=1000 * pyunits.kg / pyunits.m)

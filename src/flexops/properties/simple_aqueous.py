@@ -23,8 +23,9 @@ from idaes.core import (
 )
 from idaes.core.util.initialization import fix_state_vars, revert_state_vars
 from pyomo.common.config import ConfigValue
-from pyomo.environ import NonNegativeReals, PositiveReals, Var
+from pyomo.environ import Expression, NonNegativeReals, PositiveReals, Var
 from pyomo.environ import units as pyunits
+from pyomo.util.check_units import check_units_equivalent
 
 from flexcore.exceptions import FlexConfigError
 
@@ -64,6 +65,13 @@ class SimpleAqueousFlowData(PhysicalParameterBlock):
             "state variable (equal across arcs).",
         ),
     )
+    CONFIG.declare(
+        "density",
+        ConfigValue(
+            default=1000 * pyunits.kg / pyunits.m**3,
+            description="Default density of aqueous phase.",
+        ),
+    )
 
     def build(self) -> None:
         """Set the state-block class and the single liquid phase/component."""
@@ -72,6 +80,13 @@ class SimpleAqueousFlowData(PhysicalParameterBlock):
 
         self.Liq = LiquidPhase()
         self.H2O = Component()
+
+        self.density = self.config.density
+        if not check_units_equivalent(self.density, pyunits.kg / pyunits.m**3):
+            raise TypeError(
+                f"""Density must have units of mass/volume, specified using pyunits,
+                got {self.density}"""
+            )
 
     def get_flow_basis_var_name(self) -> str:
         """Return the name of this package's extensive flow state variable.
@@ -92,8 +107,10 @@ class SimpleAqueousFlowData(PhysicalParameterBlock):
         obj.add_properties(
             {
                 "flow_vol_phase": {"method": None, "units": "m^3/hr"},
-                "pressure": {"method": None, "units": "Pa"},
-                "temperature": {"method": None, "units": "K"},
+                "pressure": {"method": "_pressure", "units": "Pa"},
+                "temperature": {"method": "_temperature", "units": "K"},
+                "flow_mass_phase": {"method": "_flow_mass_phase"},
+                "dens_mass_phase": {"method": "_dens_mass_phase"},
             }
         )
         obj.add_default_units(
@@ -163,6 +180,13 @@ class SimpleAqueousStateBlockData(StateBlockData):
             "over (the owning unit passes TimeBlock.time_index).",
         ),
     )
+    CONFIG.declare(
+        "density",
+        ConfigValue(
+            default=1000 * pyunits.kg / pyunits.m**3,
+            description="Default density of aqueous phase.",
+        ),
+    )
 
     def build(self) -> None:
         """Create the time-indexed ``flow_vol_phase`` and any enabled extras."""
@@ -184,28 +208,57 @@ class SimpleAqueousStateBlockData(StateBlockData):
             doc="Volumetric flowrate by time and phase",
         )
         if self.params.config.has_pressure:
-            self.pressure = Var(
-                time,
-                initialize=101325.0,
-                domain=PositiveReals,
-                units=pyunits.Pa,
-                doc="Pressure",
-            )
+            self._pressure()
         if self.params.config.has_temperature:
-            self.temperature = Var(
-                time,
-                initialize=298.15,
-                domain=PositiveReals,
-                units=pyunits.K,
-                doc="Temperature",
+            self._temperature()
+
+    def _flow_mass_phase(self):
+        self.dens_mass_phase[...]
+
+        def rule_cmc(self, t, j):
+            return pyunits.convert(
+                self.flow_vol_phase[t, j] * self.dens_mass_phase[t, j],
+                pyunits.kg / pyunits.hr,
             )
+
+        self.flow_mass_phase = Expression(
+            self.config.time_index, self.params.phase_list, rule=rule_cmc
+        )
+
+    def _pressure(self):
+        self.pressure = Var(
+            self.config.time_index,
+            initialize=101325.0,
+            domain=PositiveReals,
+            units=pyunits.Pa,
+            doc="Pressure",
+        )
+
+    def _temperature(self):
+        self.temperature = Var(
+            self.config.time_index,
+            initialize=293.15,
+            domain=PositiveReals,
+            units=pyunits.K,
+            doc="Pressure",
+        )
+
+    def _dens_mass_phase(self):
+        self.dens_mass_phase = Var(
+            self.config.time_index,
+            self.params.phase_list,
+            initialize=self.params.density,
+            units=pyunits.kg / pyunits.m**3,
+            doc="Mass density of flow",
+        )
+        self.dens_mass_phase.fix()
 
     def define_state_vars(self) -> dict:
         """Return the state-variable dict (flow plus any enabled extras)."""
         state_vars = {"flow_vol_phase": self.flow_vol_phase}
-        if hasattr(self, "pressure"):
+        if self.params.config.has_pressure:
             state_vars["pressure"] = self.pressure
-        if hasattr(self, "temperature"):
+        if self.params.config.has_temperature:
             state_vars["temperature"] = self.temperature
         return state_vars
 

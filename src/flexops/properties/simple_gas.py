@@ -25,6 +25,7 @@ from idaes.core.util.initialization import fix_state_vars, revert_state_vars
 from pyomo.common.config import ConfigValue
 from pyomo.environ import NonNegativeReals, PositiveReals, Var
 from pyomo.environ import units as pyunits
+from pyomo.util.check_units import check_units_equivalent
 
 from flexcore.exceptions import FlexConfigError
 
@@ -45,6 +46,13 @@ class SimpleGasFlowData(PhysicalParameterBlock):
     """
 
     CONFIG = PhysicalParameterBlock.CONFIG()
+    CONFIG.declare(
+        "gas_mw",
+        ConfigValue(
+            default=28.9647 * pyunits.g / pyunits.mol,
+            description="Molecular weight of gas (average of all species).",
+        ),
+    )
 
     def build(self) -> None:
         """Set the state-block class and the single vapor phase/component."""
@@ -53,6 +61,10 @@ class SimpleGasFlowData(PhysicalParameterBlock):
 
         self.Vap = VaporPhase()
         self.gas = Component()
+        self.gas_mw = self.config.gas_mw
+        if not check_units_equivalent(self.gas_mw, pyunits.g / pyunits.mol):
+            raise TypeError(f"""Gas molecular weight must be in units of mass/mole,
+                got {self.gas_mw}""")
 
     def get_flow_basis_var_name(self) -> str:
         """Return the name of this package's extensive flow state variable.
@@ -68,8 +80,9 @@ class SimpleGasFlowData(PhysicalParameterBlock):
         obj.add_properties(
             {
                 "flow_vol_phase": {"method": None, "units": "m^3/hr"},
-                "pressure": {"method": None, "units": "Pa"},
                 "temperature": {"method": None, "units": "K"},
+                "pressure": {"method": None, "units": "Pa"},
+                "flow_mass_phase": {"method": "_flow_mass_phase", "units": "kg/hr"},
             }
         )
         obj.add_default_units(
@@ -157,28 +170,53 @@ class SimpleGasStateBlockData(StateBlockData):
             units=pyunits.m**3 / pyunits.hr,
             doc="Volumetric flowrate by time and phase",
         )
+        self._pressure()
+        self._temperature()
+
+    def _flow_mass_phase(self):
+        self.flow_mass_phase = Var(
+            self.config.time_index,
+            self.params.phase_list,
+            initialize=101325.0,
+            domain=PositiveReals,
+            units=pyunits.kg / pyunits.hr,
+            doc="Mass flowrate of gas",
+        )
+
+        @self.Constraint(self.config.time_index, self.params.phase_list)
+        def eq_flow_mass_phase(b, t, p):
+            return b.flow_mass_phase[t, p] == pyunits.convert(
+                b.flow_vol_phase[t, p]
+                * b.pressure[t]
+                * b.params.gas_mw
+                / (pyunits.R * b.temperature[t]),
+                to_units=pyunits.kg / pyunits.hr,
+            )
+
+    def _pressure(self):
         self.pressure = Var(
-            time,
+            self.config.time_index,
             initialize=101325.0,
             domain=PositiveReals,
             units=pyunits.Pa,
             doc="Pressure",
         )
+
+    def _temperature(self):
         self.temperature = Var(
-            time,
-            initialize=298.15,
+            self.config.time_index,
+            initialize=293.15,
             domain=PositiveReals,
             units=pyunits.K,
-            doc="Temperature",
+            doc="Pressure",
         )
 
     def define_state_vars(self) -> dict:
-        """Return the state-variable dict (all three gas states)."""
-        return {
-            "flow_vol_phase": self.flow_vol_phase,
-            "pressure": self.pressure,
-            "temperature": self.temperature,
-        }
+        """Return the state-variable dict (flow plus any enabled extras)."""
+        state_vars = {"flow_vol_phase": self.flow_vol_phase}
+        state_vars["pressure"] = self.pressure
+        state_vars["temperature"] = self.temperature
+        return state_vars
 
     def define_display_vars(self) -> dict:
         """Return the display-variable dict for reporting."""
