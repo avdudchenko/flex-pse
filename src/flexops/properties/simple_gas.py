@@ -185,12 +185,9 @@ class SimpleGasStateBlockData(StateBlockData):
 
         @self.Constraint(self.config.time_index, self.params.phase_list)
         def eq_flow_mass_phase(b, t, p):
-            return b.flow_mass_phase[t, p] == pyunits.convert(
-                b.flow_vol_phase[t, p]
-                * b.pressure[t]
-                * b.params.gas_mw
-                / (pyunits.R * b.temperature[t]),
-                to_units=pyunits.kg / pyunits.hr,
+            return b.flow_mass_phase[t, p] * b.temperature[t] == pyunits.convert(
+                b.flow_vol_phase[t, p] * b.pressure[t] * b.params.gas_mw / (pyunits.R),
+                to_units=pyunits.kg / pyunits.hr * pyunits.K,
             )
 
     def _pressure(self):
