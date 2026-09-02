@@ -21,6 +21,9 @@ state needing rolling-horizon carry-over (minimum uptime/downtime, dwell, or a
 startup delay) registers it via
 :func:`~flexops.logic.status._register_rolling_state`; M12 is what will later
 consume that registry.
+
+:func:`add_ramp_rate` is a further optional piece: it bounds how fast a
+continuous Var may change, step-to-step or over a multi-step window.
 """
 
 from flexops.logic.bypass import add_bypass
@@ -28,6 +31,7 @@ from flexops.logic.conditional import add_conditional
 from flexops.logic.degeneracy import register_parallel_group
 from flexops.logic.delays import add_startup_delay
 from flexops.logic.dwell import add_dwell
+from flexops.logic.ramp import add_ramp_rate
 from flexops.logic.status import add_status, relax, unrelax
 from flexops.logic.unit_commitment import add_startup_shutdown
 
@@ -41,4 +45,5 @@ __all__ = [
     "add_conditional",
     "register_parallel_group",
     "add_bypass",
+    "add_ramp_rate",
 ]
