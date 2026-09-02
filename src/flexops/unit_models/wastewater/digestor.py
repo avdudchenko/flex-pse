@@ -8,7 +8,7 @@ property package, the unit subclasses :class:`~flexops.core.ops_block.OpsBlockDa
 directly and hand-builds its ports and state blocks, the way
 :class:`~flexops.unit_models.powergeneration.combustor.Combustor` does.
 
-**Mass balance.** Total inlet volumetric flow is conserved across the two
+**Volume balance.** Total inlet volumetric flow is conserved across the two
 outlets:
 
 .. math::
@@ -196,10 +196,10 @@ class DigestorData(OpsBlockData):
         self._build_reactor_state()
         self._build_inlets()
         self._build_outlets()
-        self._register_stream_states()
         self._build_mass_balance()
         self._build_outlet_state()
         self._build_biogas_relation()
+        self._register_stream_states()
 
     # -- reactor operating conditions -----------------------------------------
 
@@ -293,8 +293,6 @@ class DigestorData(OpsBlockData):
                 pkg.build_state_block(time_index=tb.time_index),
             )
             state = self.find_component(state_name)
-            for _var_name, var in state.define_state_vars().items():
-                self.register_io_variable(var, role="input")
             self.add_inlet_port(
                 name=f"inlet_{name}",
                 block=state,
@@ -338,22 +336,16 @@ class DigestorData(OpsBlockData):
     # -- stream-state registration -------------------------------------------
 
     def _register_stream_states(self) -> None:
-        """Register non-flow states from the reference inlet; outlet vars as outputs."""
-        ref_name = self._inlet_names[0]
-        ref_state = self.find_component(f"inlet_{ref_name}_state")
-        ref_vars = ref_state.define_state_vars()
-        flow_name = self.config.inlet_packages[ref_name].get_flow_basis_var_name()
-        for var_name, var in ref_vars.items():
-            if var_name == flow_name:
-                continue
-            self.register_io_variable(var, role="input")
+        """Register inlet state vars as inputs;
+        reactor T/P and biogas volume as outputs."""
+        for name in self._inlet_names:
+            state = self.find_component(f"inlet_{name}_state")
+            for _var_name, var in state.define_state_vars().items():
+                self.register_io_variable(var, role="input")
 
-        for outlet_name in ("outlet_biogas", "outlet_sludge"):
-            outlet_state = self.find_component(f"{outlet_name}_state")
-            if outlet_state is None:
-                continue
-            for _var_name, var in outlet_state.define_state_vars().items():
-                self.register_io_variable(var, role="output")
+        self.register_io_variable(self.biogas_volume, role="output")
+        self.register_io_variable(self.reactor_temperature, role="output")
+        self.register_io_variable(self.reactor_pressure, role="output")
 
     # -- mass balance --------------------------------------------------------
 
@@ -381,6 +373,7 @@ class DigestorData(OpsBlockData):
                 biogas_state.find_component("flow_vol_phase")[:, self._biogas_phase]
             ),
         )
+        self.biogas_volume.doc = "Biogas volumetric flow rate."
 
         if self.config.has_sludge_outlet:
             sludge_state = self.outlet_sludge_state
@@ -390,6 +383,7 @@ class DigestorData(OpsBlockData):
                     sludge_state.find_component("flow_vol_phase")[:, self._sludge_phase]
                 ),
             )
+            self.sludge_volume.doc = "Treated-sludge volumetric flow rate."
 
             @self.Constraint(
                 tb.time_index,

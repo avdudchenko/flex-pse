@@ -273,7 +273,8 @@ def test_digestor_passes_reference_inlet_states_through_to_sludge():
 
 @pytest.mark.unit
 def test_digestor_registers_reference_inlet_intensive_states_as_inputs():
-    """Only the reference inlet's non-flow states are registered as inputs."""
+    """All inlet state vars registered as inputs;
+    reactor T/P and biogas volume as outputs."""
     m = dummy_time_block(3)
     m.props_b = SimpleGasFlow()
     _, unit = _digestor_multi_feed(
@@ -282,23 +283,17 @@ def test_digestor_registers_reference_inlet_intensive_states_as_inputs():
     inputs = _registered(unit, "input")
     assert "inlet_a_state.flow_vol_phase" in inputs
     assert "inlet_b_state.flow_vol_phase" in inputs
-    # m.properties is SimpleAqueousFlow without pressure/temperature by default,
-    # so only inlet_b (SimpleGasFlow) has those state vars registered.
     assert "inlet_b_state.pressure" in inputs
     assert "inlet_b_state.temperature" in inputs
-    # Flow is registered for every inlet; non-flow states are only registered
-    # for the reference inlet when they exist on it.
     assert "inlet_a_state.pressure" not in inputs
     assert "inlet_a_state.temperature" not in inputs
 
     outputs = _registered(unit, "output")
-    for outlet in ("outlet_biogas", "outlet_sludge"):
-        assert f"{outlet}_state.flow_vol_phase" in outputs
-        # SimpleGasFlow always carries pressure and temperature; aqueous
-        # carries them only when enabled.
-        if outlet == "outlet_biogas":
-            assert f"{outlet}_state.pressure" in outputs
-            assert f"{outlet}_state.temperature" in outputs
+    assert "unit.biogas_volume" in outputs
+    assert "unit.reactor_temperature" in outputs
+    assert "unit.reactor_pressure" in outputs
+    assert "outlet_biogas_state.flow_vol_phase" not in outputs
+    assert "outlet_biogas_state.pressure" not in outputs
 
 
 # -- biogas fraction parameter -----------------------------------------------
