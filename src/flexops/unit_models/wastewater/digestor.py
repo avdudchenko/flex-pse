@@ -66,9 +66,11 @@ from idaes.core import declare_process_block_class
 from pyomo.common.config import ConfigValue
 from pyomo.environ import units as pyunits
 
+from flexcore.config.schema import SurrogateType
 from flexcore.exceptions import FlexConfigError
 from flexcore.logger import get_logger
 from flexops.core.ops_block import OpsBlockData
+from flexops.surrogates import surrogate_from_spec
 
 _log = get_logger(__name__)
 
@@ -179,7 +181,6 @@ class DigestorData(OpsBlockData):
         self._build_mass_balance()
         self._build_outlet_state()
         self._build_biogas_relation()
-        self._maybe_swap_biogas_surrogate()
 
     # -- config validation ---------------------------------------------------
 
@@ -410,64 +411,11 @@ class DigestorData(OpsBlockData):
                 getattr(b, f"flow_in_{name}")[t] for name in inlet_names
             )
 
-    def _maybe_swap_biogas_surrogate(self) -> None:
-        """Replace the biogas relation with a fitted surrogate when configured."""
-        surrogate = getattr(self.config.flexops_config, "surrogate", None)
-        if surrogate is not None and surrogate.functional_form != "constant_intensity":
-            self._swap_biogas_relation(surrogate)
+        self.register_relation(self.biogas_relation, target=self.biogas_volume)
 
-    def _swap_biogas_relation(self, surrogate) -> None:
-        """Deactivate biogas_relation and add biogas_relation_fitted."""
-        if surrogate.functional_form != "linear":
-            raise FlexConfigError(
-                f"Functional form {surrogate.functional_form!r} is reserved for "
-                "post-v0; use 'constant_intensity' or 'linear' for the biogas "
-                "relation.",
-                field="functional_form",
-                value=surrogate.functional_form,
-            )
-
-        relation = self.find_component("biogas_relation")
-        if relation is None:
-            raise FlexConfigError(
-                f"{self.name!r} has no biogas_relation to swap; only a unit "
-                "that built a constant-intensity biogas relation can be "
-                "re-fitted.",
-                field="functional_form",
-                value=surrogate.functional_form,
-            )
-
-        tb = self._find_time_block()
-        inputs = []
-        for input_name in surrogate.input_variables:
-            var = self.find_component(input_name)
-            if var is None:
-                raise FlexConfigError(
-                    f"Fitted biogas relationship names input {input_name!r}, "
-                    f"which is not a variable on {self.name!r}.",
-                    field="input_variables",
-                    value=input_name,
-                )
-            inputs.append((surrogate.coefficients.get(input_name, 0.0), var))
-        intercept = surrogate.coefficients.get("intercept", 0.0)
-
-        relation.deactivate()
-        self.add_component(
-            "biogas_relation_fitted",
-            pyo.Constraint(
-                tb.time_index,
-                rule=lambda b, t: b.biogas_volume[t]
-                == (
-                    intercept
-                    + sum(
-                        coef * var[t] / pyunits.get_units(var[t])
-                        for coef, var in inputs
-                    )
-                )
-                * pyunits.m**3
-                / pyunits.hr,
-                doc="Fitted biogas relationship (linear), replacing the "
-                "deactivated biogas_relation. Coefficients are in m^3/hr over "
-                "each input's own units.",
-            ),
-        )
+        spec = getattr(self.config.flexops_config, "surrogate", None)
+        if (
+            spec is not None
+            and spec.surrogate_type is not SurrogateType.CONSTANT_INTENSITY
+        ):
+            self.swap_relation("biogas_relation", surrogate_from_spec(spec))

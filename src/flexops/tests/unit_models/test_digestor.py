@@ -429,14 +429,18 @@ def test_digestor_swaps_biogas_relation_with_linear_surrogate():
     """A linear surrogate deactivates biogas_relation and adds
     biogas_relation_fitted."""
     from flexcore.config.schema import SurrogateSpec
+    from flexops.surrogates import surrogate_from_spec
 
     _, unit = _digestor_aqueous(3)
-    surrogate = SurrogateSpec(
-        functional_form="linear",
-        input_variables=["flow_in_feed"],
-        coefficients={"flow_in_feed": 0.08, "intercept": 0.0},
+    spec = SurrogateSpec(
+        surrogate_type="multilinear",
+        data={
+            "input_variables": {"flow_in_feed": "m^3/hr"},
+            "output_variables": {"biogas_volume": "m^3/hr"},
+            "coefficients": {"flow_in_feed": 0.08, "intercept": 0.0},
+        },
     )
-    unit._swap_biogas_relation(surrogate)
+    unit.swap_relation("biogas_relation", surrogate_from_spec(spec))
 
     assert unit.find_component("biogas_relation") is not None
     assert not unit.biogas_relation.active
@@ -445,31 +449,31 @@ def test_digestor_swaps_biogas_relation_with_linear_surrogate():
 
 
 @pytest.mark.unit
-def test_digestor_rejects_reserved_functional_form():
-    """A non-linear, non-constant_intensity functional form is rejected."""
-    from flexcore.config.schema import SurrogateSpec
-
-    _, unit = _digestor_aqueous(3)
-    surrogate = SurrogateSpec(functional_form="nn")
-    with pytest.raises(FlexConfigError) as excinfo:
-        unit._swap_biogas_relation(surrogate)
-    assert excinfo.value.field == "functional_form"
-
-
-@pytest.mark.unit
 def test_digestor_rejects_surrogate_naming_unknown_variable():
     """A surrogate that names a non-existent input variable is rejected."""
     from flexcore.config.schema import SurrogateSpec
+    from flexops.surrogates import surrogate_from_spec
 
     _, unit = _digestor_aqueous(3)
-    surrogate = SurrogateSpec(
-        functional_form="linear",
-        input_variables=["nonexistent_var"],
-        coefficients={"nonexistent_var": 1.0},
+    spec = SurrogateSpec(
+        surrogate_type="multilinear",
+        data={
+            "input_variables": {"nonexistent_var": "m^3/hr"},
+            "output_variables": {"biogas_volume": "m^3/hr"},
+            "coefficients": {"nonexistent_var": 1.0, "intercept": 0.0},
+        },
     )
     with pytest.raises(FlexConfigError) as excinfo:
-        unit._swap_biogas_relation(surrogate)
+        unit.swap_relation("biogas_relation", surrogate_from_spec(spec))
     assert excinfo.value.field == "input_variables"
+
+
+@pytest.mark.unit
+def test_digestor_constant_intensity_does_not_swap():
+    """Without a surrogate config, biogas_relation is untouched."""
+    _, unit = _digestor_aqueous(3)
+    assert unit.biogas_relation.active
+    assert unit.find_component("biogas_relation_fitted") is None
 
 
 # -- integration -------------------------------------------------------------
