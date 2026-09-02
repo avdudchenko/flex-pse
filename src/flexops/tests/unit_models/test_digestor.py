@@ -175,27 +175,32 @@ def test_digestor_no_sludge_outlet_builds_only_biogas():
     assert "outlet_sludge" not in ports
     assert unit.find_component("outlet_sludge_state") is None
     assert unit.find_component("sludge_volume") is None
-    assert unit.find_component("sludge_volume_eq") is None
+    assert unit.find_component("sludge_mass_eq") is None
 
 
 @pytest.mark.unit
 def test_digestor_mass_balance_body_sludge():
-    """sludge_volume[t] == total_inlet - biogas_volume[t]."""
+    """sludge_volume[t] == (total_inlet_mass - biogas_mass) / sludge_density."""
     m = dummy_time_block(3)
     m.properties2 = SimpleAqueousFlow()
     _, unit = _digestor_multi_feed(
         3, inlet_packages={"a": m.properties, "b": m.properties2}
     )
-    total = 1.0 + 2.0
-    biogas = 0.08 * total
+    total_vol = 1.0 + 2.0
+    total_mass = total_vol * 1000.0
+    biogas_mass = 0.293
     for t in range(3):
         _fix(unit, "flow_in_a", t, 1.0)
         _fix(unit, "flow_in_b", t, 2.0)
-        _fix(unit, "biogas_volume", t, biogas)
-        _fix(unit, "sludge_volume", t, total - biogas)
-        assert pyo.value(unit.sludge_volume_eq[t].body) == pytest.approx(0.0, abs=1e-9)
-        unit.sludge_volume[t].fix(total - biogas + 1.0)
-        assert pyo.value(unit.sludge_volume_eq[t].body) == pytest.approx(1.0, abs=1e-9)
+        _fix(unit, "biogas_volume", t, 0.24)
+        unit.outlet_biogas_state.flow_mass_phase[t, "Vap"].fix(biogas_mass)
+        desired_sludge_vol = (total_mass - biogas_mass) / 1000.0
+        unit.outlet_sludge_state.flow_vol_phase[t, "Liq"].fix(desired_sludge_vol)
+        assert pyo.value(unit.sludge_mass_eq[t].body) == pytest.approx(0.0, abs=1e-9)
+        unit.outlet_sludge_state.flow_vol_phase[t, "Liq"].fix(
+            desired_sludge_vol + 0.001
+        )
+        assert pyo.value(unit.sludge_mass_eq[t].body) == pytest.approx(1.0, abs=1e-9)
 
 
 @pytest.mark.unit
@@ -214,9 +219,9 @@ def test_digestor_biogas_relation_body():
 
 @pytest.mark.unit
 def test_digestor_no_sludge_eq_when_has_sludge_outlet_is_false():
-    """No sludge_volume_eq is built when the sludge outlet is absent."""
+    """No sludge_mass_eq is built when the sludge outlet is absent."""
     _, unit = _digestor_aqueous(3, has_sludge_outlet=False)
-    assert unit.find_component("sludge_volume_eq") is None
+    assert unit.find_component("sludge_mass_eq") is None
     assert unit.find_component("sludge_volume") is None
 
 
@@ -237,23 +242,23 @@ def test_digestor_arbitrary_inlet_count_is_units_consistent(n_inlets):
 
 @pytest.mark.unit
 def test_digestor_passes_reference_inlet_states_through_to_biogas():
-    """Reference inlet's non-flow states pass through to the biogas outlet."""
+    """Reactor T/P are tied to the biogas outlet's T/P, not the inlet's."""
     m = dummy_time_block(3)
     m.inlet_props = SimpleGasFlow()
     _, unit = _digestor_gas_biogas(3, inlet_packages={"feed": m.inlet_props})
-    assert unit.find_component("pass_through_outlet_biogas_pressure_eq") is not None
-    assert unit.find_component("pass_through_outlet_biogas_temperature_eq") is not None
+    assert unit.find_component("reactor_pressure_eq") is not None
+    assert unit.find_component("reactor_temperature_eq") is not None
     for t in range(3):
-        unit.inlet_feed_state.pressure[t].fix(101325.0)
+        unit.reactor_pressure[t].fix(101325.0)
         unit.outlet_biogas_state.pressure[t].fix(101325.0)
-        assert pyo.value(
-            unit.pass_through_outlet_biogas_pressure_eq[t].body
-        ) == pytest.approx(0.0, abs=1e-9)
+        assert pyo.value(unit.reactor_pressure_eq[t].body) == pytest.approx(
+            0.0, abs=1e-9
+        )
 
 
 @pytest.mark.unit
 def test_digestor_passes_reference_inlet_states_through_to_sludge():
-    """Reference inlet's non-flow states pass through to the sludge outlet."""
+    """Reactor T/P are tied to the sludge outlet's T/P when available."""
     m = dummy_time_block(3)
     m.inlet_props = SimpleGasFlow()
     m.sludge_props = SimpleAqueousFlow(has_pressure=True, has_temperature=True)
@@ -262,8 +267,8 @@ def test_digestor_passes_reference_inlet_states_through_to_sludge():
         inlet_packages={"feed": m.inlet_props},
         sludge_property_package=m.sludge_props,
     )
-    assert unit.find_component("pass_through_outlet_sludge_pressure_eq") is not None
-    assert unit.find_component("pass_through_outlet_sludge_temperature_eq") is not None
+    assert unit.find_component("sludge_pressure_eq") is not None
+    assert unit.find_component("sludge_temperature_eq") is not None
 
 
 @pytest.mark.unit

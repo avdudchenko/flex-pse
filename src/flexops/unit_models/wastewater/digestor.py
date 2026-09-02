@@ -169,18 +169,57 @@ class DigestorData(OpsBlockData):
             "when has_sludge_outlet is True.",
         ),
     )
+    CONFIG.declare(
+        "operating_temperature",
+        ConfigValue(
+            default=288.706 * pyunits.K,
+            description="Reactor operating temperature (K). Defaults to 15.55 C "
+            "(288.706 K), the standard condition for SCFM measurement. Fixed "
+            "at construction and passed through to the biogas outlet.",
+        ),
+    )
+    CONFIG.declare(
+        "operating_pressure",
+        ConfigValue(
+            default=101325.0 * pyunits.Pa,
+            description="Reactor operating pressure (Pa). Defaults to 1 bar "
+            "(101325 Pa), the standard condition for SCFM measurement. Fixed "
+            "at construction and passed through to the biogas outlet.",
+        ),
+    )
 
     def build(self) -> None:
         """Validate config, build per-inlet state blocks, outlets, balances."""
         super().build()
         self._validate_inlet_packages()
         self._resolve_outlet_packages()
+        self._build_reactor_state()
         self._build_inlets()
         self._build_outlets()
         self._register_stream_states()
         self._build_mass_balance()
         self._build_outlet_state()
         self._build_biogas_relation()
+
+    # -- reactor operating conditions -----------------------------------------
+
+    def _build_reactor_state(self) -> None:
+        """Create reactor T/P Vars fixed from config, tied to the biogas outlet."""
+        tb = self._find_time_block()
+        self.reactor_temperature = pyo.Var(
+            tb.time_index,
+            initialize=pyo.value(self.config.operating_temperature),
+            units=pyunits.K,
+            doc="Digestor reactor operating temperature (K).",
+        )
+        self.reactor_temperature.fix()
+        self.reactor_pressure = pyo.Var(
+            tb.time_index,
+            initialize=pyo.value(self.config.operating_pressure),
+            units=pyunits.Pa,
+            doc="Digestor reactor operating pressure (Pa).",
+        )
+        self.reactor_pressure.fix()
 
     # -- config validation ---------------------------------------------------
 
@@ -354,12 +393,19 @@ class DigestorData(OpsBlockData):
 
             @self.Constraint(
                 tb.time_index,
-                doc="Treated-sludge volume equals total inlet minus biogas volume.",
+                doc="Mass balance: sludge mass flow equals total inlet mass "
+                "flow minus biogas mass flow.",
             )
-            def sludge_volume_eq(b, t):
+            def sludge_mass_eq(b, t):
                 return (
-                    b.sludge_volume[t]
-                    == sum(flows[name][t] for name in inlet_names) - b.biogas_volume[t]
+                    sludge_state.flow_mass_phase[t, self._sludge_phase]
+                    == sum(
+                        self.find_component(f"inlet_{name}_state").flow_mass_phase[
+                            t, self._phase_map[name]
+                        ]
+                        for name in inlet_names
+                    )
+                    - biogas_state.flow_mass_phase[t, self._biogas_phase]
                 )
 
     # -- outlet intensive states ----------------------------------------------
@@ -372,19 +418,66 @@ class DigestorData(OpsBlockData):
         flow_name = self.config.inlet_packages[ref_name].get_flow_basis_var_name()
         ref_vars = ref_state.define_state_vars()
 
+        tb = self._find_time_block()
+
         for outlet_name in ("outlet_biogas", "outlet_sludge"):
             outlet_port = self.find_component(outlet_name)
             if outlet_port is None:
                 continue
             outlet_state = self.find_component(f"{outlet_name}_state")
             outlet_vars = outlet_state.define_state_vars()
-            exclude = [flow_name] + [v for v in ref_vars if v not in outlet_vars]
+            exclude = [flow_name] + [
+                v
+                for v in ref_vars
+                if v not in outlet_vars or v in ("pressure", "temperature")
+            ]
             self.add_pass_through_constraints(
                 ref_port,
                 outlet_port,
                 exclude_vars=exclude,
                 name_prefix=f"pass_through_{outlet_name}",
             )
+
+        biogas_state = self.outlet_biogas_state
+        if hasattr(biogas_state, "pressure") and hasattr(biogas_state, "temperature"):
+            self.add_component(
+                "reactor_pressure_eq",
+                pyo.Constraint(
+                    tb.time_index,
+                    rule=lambda b, t: b.reactor_pressure[t]
+                    == b.outlet_biogas_state.pressure[t],
+                ),
+            )
+            self.add_component(
+                "reactor_temperature_eq",
+                pyo.Constraint(
+                    tb.time_index,
+                    rule=lambda b, t: b.reactor_temperature[t]
+                    == b.outlet_biogas_state.temperature[t],
+                ),
+            )
+
+        if self.config.has_sludge_outlet:
+            sludge_state = self.outlet_sludge_state
+            if hasattr(sludge_state, "pressure") and hasattr(
+                sludge_state, "temperature"
+            ):
+                self.add_component(
+                    "sludge_pressure_eq",
+                    pyo.Constraint(
+                        tb.time_index,
+                        rule=lambda b, t: b.reactor_pressure[t]
+                        == b.outlet_sludge_state.pressure[t],
+                    ),
+                )
+                self.add_component(
+                    "sludge_temperature_eq",
+                    pyo.Constraint(
+                        tb.time_index,
+                        rule=lambda b, t: b.reactor_temperature[t]
+                        == b.outlet_sludge_state.temperature[t],
+                    ),
+                )
 
     # -- biogas relation -----------------------------------------------------
 
