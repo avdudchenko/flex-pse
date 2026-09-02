@@ -18,12 +18,14 @@ from flexops.unit_models.reverseosmosis import ReverseOsmosis
 from flexops.unit_models.splitter import Splitter
 from flexops.unit_models.storage.battery import BatteryModel
 from flexops.unit_models.storage.tank import Tank
+from flexops.unit_models.wastewater.digestor import Digestor
 
 __all__ = [
     "BatteryModel",
     "Combustor",
     "ConstantEnergyIntensityModel",
     "DIDOBlock",
+    "Digestor",
     "Exchanger",
     "Feed",
     "GenericRenewables",
