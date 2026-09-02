@@ -19,11 +19,9 @@ step, as in the frozen script.
 """
 
 import json
-import re
 from pathlib import Path
 
 import pyomo.environ as pyo
-from pyomo.environ import units as pyunits
 from pyomo.network import Arc
 
 from flexcore.config.io import load_model_config
@@ -33,52 +31,11 @@ from flexops.core.network_block import NetworkBlock
 from flexops.core.ops_block import OpsBlockData
 from flexops.core.plant_block import PlantBlock
 from flexops.core.time_block import TimeBlock
-from flexops.costing import FlexCosting, currency_units
+from flexops.core.units import parse_units
+from flexops.costing import FlexCosting
 from flexops.properties.simple_aqueous import SimpleAqueousFlow
 
 _QUANTITY_KEYS = {"value", "units"}
-_UNIT_TOKEN = re.compile(r"^([A-Za-z$]+)(?:\*\*|\^)?(-?\d+)?$")
-
-
-def parse_units(text: str):
-    """Parse a units string into a Pyomo units expression.
-
-    Handles the compact forms persisted configs use: ``"min"``, ``"m^3/hr"``,
-    ``"kWh/m^3"``, ``"USD/kWh"`` — ``*``-separated factors, at most one ``/``,
-    and ``^``/``**`` exponents. A token Pyomo does not know is registered as a
-    currency (so ``"USD"`` works without the costing block existing yet).
-
-    Args:
-        text: The units string.
-
-    Returns:
-        The corresponding Pyomo units expression.
-
-    Raises:
-        FlexConfigError: If a token is not a parsable unit name and exponent.
-    """
-    numerator, _, denominator = text.strip().partition("/")
-    result = 1
-    for side, factors in ((1, numerator), (-1, denominator)):
-        for token in factors.split("*") if factors.strip() else []:
-            token = token.strip()
-            if not token:
-                continue
-            match = _UNIT_TOKEN.match(token)
-            if match is None:
-                raise FlexConfigError(
-                    f"Could not parse {token!r} in units string {text!r}. Write "
-                    "units as '*'-separated factors with at most one '/', e.g. "
-                    "'kWh/m^3'.",
-                    field="units",
-                    value=text,
-                )
-            name, exponent = match.group(1), int(match.group(2) or 1)
-            unit = getattr(pyunits, name, None)
-            if unit is None:
-                unit = currency_units(name)
-            result = result * unit ** (side * exponent)
-    return result
 
 
 def parse_quantity(value, *, strict: bool = True):

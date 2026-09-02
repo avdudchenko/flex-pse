@@ -7,8 +7,10 @@ from pyomo.environ import units as pyunits
 from pyomo.network import Port
 
 from flexcore import nomenclature as nm
+from flexcore.config.schema import SurrogateSpec, SurrogateType, UnitConfig
 from flexcore.exceptions import FlexConfigError
 from flexops.properties.simple_gas import SimpleGasFlowData
+from flexops.surrogates import MultilinearSurrogate
 from flexops.testing import UnitModelTestHarness, dummy_gas_time_block
 from flexops.unit_models import Combustor
 from flexops.unit_models.powergeneration.combustor import CombustorPowerRelation
@@ -16,6 +18,8 @@ from flexops.unit_models.powergeneration.combustor import CombustorPowerRelation
 _DIGESTER_HV = 6.0 * pyunits.kWh / pyunits.m**3
 _NATURAL_GAS_HV = 10.5 * pyunits.kWh / pyunits.m**3
 _EFFICIENCY = 0.35
+_INTERCEPT = 1.0
+_SLOPE = 2.0
 
 
 @declare_process_block_class("_TwoPhaseGasFlow")
@@ -47,6 +51,28 @@ def _combustor(n: int = 3, **kwargs):
 def _fix(unit, name: str, t, value: float) -> None:
     """Fix a named state var on inlet/outlet state block ``name`` at time ``t``."""
     getattr(unit, name)[t].fix(value)
+
+
+def _surrogate_spec() -> SurrogateSpec:
+    """A multilinear relationship for ``power_generated``, in magnitude space."""
+    return SurrogateSpec(
+        surrogate_type=SurrogateType.MULTILINEAR,
+        data={
+            "input_variables": {"flow_in_fuel": "m^3/hr"},
+            "output_variables": {"power_generated": "kW"},
+            "coefficients": {"intercept": _INTERCEPT, "flow_in_fuel": _SLOPE},
+        },
+    )
+
+
+def _surrogate_config() -> UnitConfig:
+    """A ``UnitConfig`` carrying :func:`_surrogate_spec`, for a config-time swap."""
+    return UnitConfig(unit_model_class="Combustor", surrogate=_surrogate_spec())
+
+
+def _multilinear_surrogate() -> MultilinearSurrogate:
+    """The built surrogate, for a direct ``swap_relation`` call."""
+    return MultilinearSurrogate(_surrogate_spec().data)
 
 
 class TestCombustorConstantIntensity(UnitModelTestHarness):
@@ -359,7 +385,7 @@ def test_combustor_requires_a_single_phase_property_package():
 
 @pytest.mark.unit
 def test_combustor_power_relation_body_heating_value():
-    """The heating-value relation body is 0 at the hand-computed export."""
+    """The heating-value relation body is 0 at the hand-computed magnitude."""
     _, unit = _combustor(
         3,
         inlet_names=("digester_gas", "natural_gas"),
@@ -369,8 +395,8 @@ def test_combustor_power_relation_body_heating_value():
     for t in range(3):
         _fix(unit, "flow_in_digester_gas", t, 2.0)
         _fix(unit, "flow_in_natural_gas", t, 3.0)
-        expected = -_EFFICIENCY * (6.0 * 2.0 + 10.5 * 3.0)
-        unit.power_electrical[t].fix(expected)
+        expected = _EFFICIENCY * (6.0 * 2.0 + 10.5 * 3.0)
+        unit.power_generated[t].fix(expected)
         assert pyo.value(unit.power_electrical_relation[t].body) == pytest.approx(
             0.0, rel=1e-6
         )
@@ -385,8 +411,8 @@ def test_combustor_power_relation_body_constant_intensity():
     for t in range(3):
         _fix(unit, "flow_in_a", t, 2.0)
         _fix(unit, "flow_in_b", t, 3.0)
-        expected = -1.5 * (2.0 + 3.0)
-        unit.power_electrical[t].fix(expected)
+        expected = 1.5 * (2.0 + 3.0)
+        unit.power_generated[t].fix(expected)
         assert pyo.value(unit.power_electrical_relation[t].body) == pytest.approx(
             0.0, rel=1e-6
         )
@@ -398,6 +424,99 @@ def test_combustor_power_electrical_is_an_export():
     _, unit = _combustor(3)
     for t in range(3):
         assert unit.power_electrical[t].ub == pytest.approx(0.0)
+
+
+@pytest.mark.unit
+def test_combustor_power_generated_is_non_negative():
+    """``power_generated[t]`` -- the relation's target -- is bounded below at 0."""
+    _, unit = _combustor(3)
+    for t in range(3):
+        assert unit.power_generated[t].lb == pytest.approx(0.0)
+        assert unit.power_generated[t].ub is None
+
+
+@pytest.mark.unit
+def test_combustor_sign_constraint_ties_export_to_generation():
+    """``power_electrical_sign`` holds exactly when power == -power_generated."""
+    _, unit = _combustor(3)
+    for t in range(3):
+        unit.power_generated[t].fix(4.0)
+        unit.power_electrical[t].fix(-4.0)
+        assert pyo.value(unit.power_electrical_sign[t].body) == pytest.approx(
+            0.0, abs=1e-9
+        )
+        unit.power_electrical[t].fix(4.0)
+        assert pyo.value(unit.power_electrical_sign[t].body) != pytest.approx(
+            0.0, abs=1e-9
+        )
+
+
+@pytest.mark.unit
+def test_combustor_sign_constraint_is_not_swappable():
+    """Only the magnitude relation is registered, so only it can be swapped."""
+    _, unit = _combustor(3)
+    registered = {record.name for record in unit._io_registry.relations}
+    assert registered == {"power_electrical_relation"}
+    assert unit.find_component("power_electrical_sign") is not None
+    with pytest.raises(FlexConfigError) as excinfo:
+        unit.swap_relation("power_electrical_sign", _multilinear_surrogate())
+    assert excinfo.value.field == "relation_name"
+
+
+@pytest.mark.unit
+def test_combustor_relation_targets_the_generation_magnitude():
+    """The registered relation determines ``power_generated``, not the draw."""
+    _, unit = _combustor(3)
+    record = next(
+        r for r in unit._io_registry.relations if r.name == "power_electrical_relation"
+    )
+    assert record.target is unit.power_generated
+
+
+@pytest.mark.unit
+def test_combustor_registers_power_generated_as_its_io_output():
+    """The regressed output is the magnitude, so a fit carries the model's sign."""
+    _, unit = _combustor(3)
+    outputs = {
+        record.var.local_name
+        for record in unit._io_registry.io_variables
+        if record.role == "output"
+    }
+    assert "power_generated" in outputs
+    assert "power_electrical" not in outputs
+
+
+@pytest.mark.unit
+def test_combustor_energy_intensity_is_non_negative():
+    """A design mode or regression cannot unfix the intensity into a sign flip."""
+    _, unit = _combustor(3)
+    assert unit.energy_intensity.lb == pytest.approx(0.0)
+
+
+@pytest.mark.unit
+def test_combustor_swaps_its_relation_from_a_config_surrogate():
+    """A config ``SurrogateSpec`` swaps the magnitude relation at construction."""
+    _, unit = _combustor(3, flexops_config=_surrogate_config())
+    assert not unit.power_electrical_relation[0].active
+    assert unit.power_electrical_sign[0].active
+    fitted = unit.find_component("power_electrical_relation_fitted")
+    assert fitted is not None
+    assert fitted[0].active
+
+
+@pytest.mark.unit
+def test_combustor_swapped_relation_feeds_the_magnitude():
+    """The fitted body determines ``power_generated``; the sign makes it an export."""
+    _, unit = _combustor(3, flexops_config=_surrogate_config())
+    fitted = unit.power_electrical_relation_fitted
+    for t in range(3):
+        _fix(unit, "flow_in_fuel", t, 1.0)
+        unit.power_generated[t].fix(_INTERCEPT + _SLOPE)
+        unit.power_electrical[t].fix(-(_INTERCEPT + _SLOPE))
+        assert pyo.value(fitted[t].body) == pytest.approx(0.0, abs=1e-9)
+        assert pyo.value(unit.power_electrical_sign[t].body) == pytest.approx(
+            0.0, abs=1e-9
+        )
 
 
 @pytest.mark.unit

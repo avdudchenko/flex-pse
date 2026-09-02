@@ -44,3 +44,6 @@ Example use cases of flex-pse are detailed in the [`flex-pse-examples`](https://
 
 This project is built milestone-by-milestone. See [`PLAN.md`](PLAN.md) for the
 roadmap and [`plan/00_conventions.md`](plan/00_conventions.md) for the rules that govern every change.
+
+## Disclaimer
+This repository contains a significant amount of code that was generated via a large-language model. 

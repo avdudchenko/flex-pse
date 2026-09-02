@@ -89,7 +89,9 @@ class ReverseOsmosisData(SIDOBlockData):
         ConfigValue(
             default=3.0 * pyunits.kWh / pyunits.m**3,
             description="Electrical energy per unit volume of permeate "
-            "(a fixed, regressable Var once built), kWh/m^3.",
+            "produced -- the skid's specific energy consumption, the basis the "
+            "desalination industry quotes (a fixed, regressable Var once "
+            "built), kWh/m^3.",
         ),
     )
 

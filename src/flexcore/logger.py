@@ -111,14 +111,11 @@ class FlexPseLogger(logging.Logger):
 
         Note: This module was generated with AI assistance.
 
-        Parameters
-        ----------
-        msg : str
-            The message to log. Supports ``%``-style formatting with ``args``.
-        *args
-            Positional arguments interpolated into ``msg``.
-        **kwargs
-            Extra keyword arguments forwarded to :meth:`logging.Logger._log`.
+        Args:
+            msg: The message to log. Supports ``%``-style formatting with ``args``.
+            *args: Positional arguments interpolated into ``msg``.
+            **kwargs: Extra keyword arguments forwarded to the underlying
+                :class:`logging.Logger` emit call.
         """
         if self.isEnabledFor(CONFIGURATION_SIMPLIFICATIONS):
             self._log(CONFIGURATION_SIMPLIFICATIONS, msg, args, **kwargs)

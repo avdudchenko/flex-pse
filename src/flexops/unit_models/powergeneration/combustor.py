@@ -12,26 +12,45 @@ hand-writing its ports and balances, the way
 :class:`~flexops.unit_models.storage.battery.BatteryModel` does.
 
 Two flow-to-power relations, selected automatically (never configured
-directly) from whether every inlet was given a heating value:
+directly) from whether every inlet was given a heating value. Both determine
+``power_generated[t]``, the **non-negative** generation magnitude:
 
 * **Heating value** -- when every inlet in ``inlet_names`` has an entry in
   ``heating_values``:
 
   .. math::
 
-      P_{elec}[t] = -\eta \sum_i \text{HV}_i \cdot \dot{V}_i[t]
+      P_{gen}[t] = \eta \sum_i \text{HV}_i \cdot \dot{V}_i[t]
 
 * **Constant intensity** -- when no inlet has a heating value:
 
   .. math::
 
-      P_{elec}[t] = -\text{energy\_intensity} \sum_i \dot{V}_i[t]
+      P_{gen}[t] = \text{energy\_intensity} \sum_i \dot{V}_i[t]
 
-Both are dimensionally exact (kWh/m^3 * m^3/hr = kW, no fudge factor) and
-**negative**: like a discharging :class:`BatteryModel`, a combustor *exports*
-electrical power, so ``power_electrical[t]`` is upper-bounded at 0 and plant
+Both are dimensionally exact (kWh/m^3 * m^3/hr = kW, no fudge factor). The
+sign is a separate constraint,
+
+.. math::
+
+    P_{elec}[t] = -P_{gen}[t]
+
+so that like a discharging :class:`BatteryModel`, a combustor *exports*
+electrical power: ``power_electrical[t]`` is upper-bounded at 0 and plant
 aggregation (a plain sum) nets the export against load with no per-unit sign
 flipping.
+
+Splitting the magnitude from the sign is what makes that convention survive a
+surrogate swap. Only ``power_electrical_relation`` is registered, so only it
+can be swapped (see
+:meth:`~flexops.core.ops_block.OpsBlockData.register_relation`); the sign
+constraint cannot be. Its target ``power_generated`` carries the lower bound
+of 0, so a fitted relationship that predicts a negative export violates a
+bound naming the quantity it got wrong, rather than silently conflicting with
+``power_electrical``'s upper bound. Surrogates for this unit are therefore
+fitted in generation-magnitude space -- positive, the convention generation
+data is normally logged in -- which is also why ``power_generated`` (not
+``power_electrical``) is the unit's registered IO output.
 
 A partial ``heating_values`` mapping -- some but not all inlets named -- is
 rejected rather than silently falling back to the constant-intensity relation,
@@ -75,8 +94,10 @@ from pyomo.common.config import ConfigValue
 from pyomo.environ import units as pyunits
 
 from flexcore import nomenclature as nm
+from flexcore.config.schema import SurrogateType
 from flexcore.exceptions import FlexConfigError
 from flexops.core.ops_block import OpsBlockData
+from flexops.surrogates import surrogate_from_spec
 
 _HEATING_VALUE_UNITS = pyunits.kWh / pyunits.m**3
 
@@ -479,15 +500,34 @@ class CombustorData(OpsBlockData):
     # -- power relation -------------------------------------------------------
 
     def _build_power_relation(self) -> None:
-        """Declare the electrical export and its resolved flow-to-power relation."""
+        """Declare the export, its generation magnitude, and their relation."""
         tb = self._find_time_block()
         power = self.declare_power(nm.PowerKind.ELECTRICAL)
-        self.register_io_variable(power, role="output")
         for t in tb.time_index:
             power[t].setub(0.0)
 
         inlet_names = self.config.inlet_names
         flows = {name: getattr(self, f"flow_in_{name}") for name in inlet_names}
+
+        self.power_generated = pyo.Var(
+            tb.time_index,
+            bounds=(0.0, None),
+            initialize=0.0,
+            units=pyunits.kW,
+            doc="Gross electrical generation magnitude (kW, non-negative). The "
+            "relation's target: its lower bound is what keeps a swapped-in "
+            "surrogate from predicting a negative export.",
+        )
+        self.register_io_variable(self.power_generated, role="output")
+
+        @self.Constraint(
+            tb.time_index,
+            doc="Sign convention: an export is a negative draw, "
+            "power_electrical == -power_generated. Deliberately not registered, "
+            "so no surrogate swap can replace it.",
+        )
+        def power_electrical_sign(b, t):
+            return power[t] == -b.power_generated[t]
 
         if self._power_relation is CombustorPowerRelation.HEATING_VALUE:
             heating_values = {}
@@ -509,11 +549,11 @@ class CombustorData(OpsBlockData):
 
             @self.Constraint(
                 tb.time_index,
-                doc="power_electrical == -efficiency * sum(heating_value_i * "
-                "flow_in_i); an export (kW).",
+                doc="power_generated == efficiency * sum(heating_value_i * "
+                "flow_in_i); the export magnitude (kW).",
             )
             def power_electrical_relation(b, t):
-                return -power[t] == pyunits.convert(
+                return b.power_generated[t] == pyunits.convert(
                     efficiency
                     * sum(
                         heating_values[name] * flows[name][t] for name in inlet_names
@@ -527,19 +567,25 @@ class CombustorData(OpsBlockData):
                 self.config.energy_intensity,
                 _HEATING_VALUE_UNITS,
                 "Electrical output per unit total inlet volume.",
+                bounds=(0.0, None),
             )
 
             @self.Constraint(
                 tb.time_index,
-                doc="power_electrical == -energy_intensity * total inlet flow; "
-                "an export (kW).",
+                doc="power_generated == energy_intensity * total inlet flow; "
+                "the export magnitude (kW).",
             )
             def power_electrical_relation(b, t):
-                return -power[t] == pyunits.convert(
+                return b.power_generated[t] == pyunits.convert(
                     energy_intensity * sum(flows[name][t] for name in inlet_names),
                     pyunits.kW,
                 )
 
-        surrogate = getattr(self.config.flexops_config, "surrogate", None)
-        if surrogate is not None and surrogate.functional_form != "constant_intensity":
-            self.swap_energy_relation(surrogate, kind=nm.PowerKind.ELECTRICAL)
+        self.register_relation(
+            self.power_electrical_relation, target=self.power_generated
+        )
+        spec = getattr(self.config.flexops_config, "surrogate", None)
+        if spec is not None and (
+            spec.surrogate_type is not SurrogateType.CONSTANT_INTENSITY
+        ):
+            self.swap_relation("power_electrical_relation", surrogate_from_spec(spec))

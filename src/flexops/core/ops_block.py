@@ -29,12 +29,14 @@ from collections.abc import Sequence
 import pyomo.environ as pyo
 from idaes.core import UnitModelBlockData, declare_process_block_class
 from pyomo.common.config import ConfigValue
+from pyomo.core.base.units_container import UnitsError
 from pyomo.environ import units as pyunits
 from pyomo.network import Port
 
 from flexcore import nomenclature as nm
 from flexcore.config.schema import (
     ExternalDispatchSpec,
+    SurrogateType,
     UnitCommitmentConfig,
     UnitConfig,
 )
@@ -47,8 +49,10 @@ from flexops.core.registration import (
     IOVariableRecord,
     ParameterRecord,
     PowerRecord,
+    RelationRecord,
 )
 from flexops.core.time_block import TimeBlockData, find_time_block
+from flexops.surrogates import Surrogate, surrogate_from_spec
 
 
 class RelaxationPolicy(enum.StrEnum):
@@ -755,14 +759,23 @@ class OpsBlockData(UnitModelBlockData):
         .. math:: P_{kind}[t] = \\text{intensity} \\cdot \\dot{V}[t]
 
         as a Constraint named ``power_<kind>_relation``. **That name is the
-        swap contract**: FlexParameterize deactivates exactly it and attaches a
-        fitted replacement (see :meth:`swap_energy_relation`). When this unit
-        was built from a config whose ``SurrogateSpec`` asks for a richer
-        functional form, the swap is applied here, at construction.
+        swap contract**: it is registered (see :meth:`register_relation`) so
+        FlexParameterize can deactivate exactly it and attach a fitted
+        replacement (see :meth:`swap_relation`). When this unit was built from
+        a config whose ``SurrogateSpec`` asks for a richer functional form, the
+        swap is applied here, at construction.
+
+        ``flow`` is the unit's **product** stream — what it delivers, not what
+        it takes in — so the intensity reads as energy per unit of output (a
+        reverse-osmosis skid's kWh per m³ of permeate, the industry's specific
+        energy consumption). For a unit that passes its flow straight through
+        the two coincide; for one with a recovery or a loss they do not, and
+        the product is the meaningful denominator. The basis is recorded on the
+        unit's registry so FlexParameterize regresses against the same stream.
 
         Args:
-            flow: A time-indexed flow Var/Reference (``flow[t]``) the draw
-                scales with.
+            flow: The unit's time-indexed product flow Var/Reference
+                (``flow[t]``) the draw scales with.
             kind: The :class:`~flexcore.nomenclature.PowerKind` of the draw.
             intensity: Energy per unit volume (e.g. ``0.5 * pyunits.kWh /
                 pyunits.m**3``), converted to kWh/m³.
@@ -772,6 +785,7 @@ class OpsBlockData(UnitModelBlockData):
         tb = self._find_time_block()
         power = self.declare_power(kind, temperature=temperature)
         self.register_io_variable(power, role="output")
+        self._io_registry.intensity_basis[kind] = flow.local_name
 
         intensity_var = self.declare_process_parameter(
             nm.INTENSITY_VARS[kind],
@@ -780,103 +794,194 @@ class OpsBlockData(UnitModelBlockData):
             f"{kind.value.capitalize()} energy per unit volume processed.",
         )
 
-        relation = f"{nm.POWER_VARS[kind][0]}_relation"
+        relation_name = f"{nm.POWER_VARS[kind][0]}_relation"
         self.add_component(
-            relation,
+            relation_name,
             pyo.Constraint(
                 tb.time_index,
                 rule=lambda b, t: power[t]
                 == pyunits.convert(intensity_var * flow[t], pyunits.kW),
-                doc=f"{relation}: power == {nm.INTENSITY_VARS[kind]} * flow. "
-                "kWh/m^3 * m^3/hr = kW "
+                doc=f"{relation_name}: power == {nm.INTENSITY_VARS[kind]} * "
+                "flow. kWh/m^3 * m^3/hr = kW "
                 "exactly, no fudge factor. FlexParameterize swaps this "
                 "Constraint in place when it fits a richer relationship.",
             ),
         )
+        self.register_relation(self.find_component(relation_name), target=power)
 
-        surrogate = getattr(self.config.flexops_config, "surrogate", None)
-        if surrogate is not None and surrogate.functional_form != "constant_intensity":
-            self.swap_energy_relation(surrogate, kind=kind)
+        spec = getattr(self.config.flexops_config, "surrogate", None)
+        if spec is not None and (
+            spec.surrogate_type is not SurrogateType.CONSTANT_INTENSITY
+        ):
+            self.swap_relation(relation_name, surrogate_from_spec(spec))
 
-    def swap_energy_relation(
-        self, surrogate, *, kind: nm.PowerKind = nm.PowerKind.ELECTRICAL
-    ) -> None:
-        """Replace this unit's energy relationship in place, from a fitted spec.
+    def resolve_variable(self, name: str, *, field: str):
+        """Return the variable ``name`` refers to on this unit.
 
-        Deactivates ``power_<kind>_relation`` (never deletes it — conventions
-        §9) and adds ``power_<kind>_relation_fitted`` built from ``surrogate``,
-        reusing the unit's existing registered variables, so ports and arcs are
-        untouched. One implementation, two callers: construction-time
-        (:meth:`add_constant_intensity_relation`, via a config's
-        ``SurrogateSpec``) and runtime (``flexparameterize.apply_to_model``).
-
-        The ``"linear"`` form is ``power[t] == intercept + Σ_i c_i *
-        input_i[t]``, where each input is named in
-        ``surrogate.input_variables``, resolved on this unit, and normalized by
-        its own units — so every coefficient is read in kW.
+        Part of the documented contract a :class:`~flexops.surrogates.base.Surrogate`
+        uses to resolve its declared input variables at build time (dotted
+        names into a sub-block, e.g. ``"outlet_state.pressure"``, resolve too).
 
         Args:
-            surrogate: The fitted
-                :class:`~flexcore.config.schema.SurrogateSpec`.
-            kind: Which power draw's relationship to replace.
+            name: A component name, possibly dotted into a sub-block.
+            field: The surrogate field the name came from, for the error.
+
+        Returns:
+            The resolved Pyomo component.
 
         Raises:
-            FlexConfigError: If the unit has no such relationship to swap, an
-                input variable is not found on the unit, or the functional form
-                is one of the reserved post-v0 values.
+            FlexConfigError: If the name is not a component on this unit.
         """
-        power_name = nm.POWER_VARS[kind][0]
-        relation = self.find_component(f"{power_name}_relation")
-        if relation is None:
+        var = self.find_component(name)
+        if var is None:
             raise FlexConfigError(
-                f"{self.name!r} has no {power_name}_relation to swap; only a "
-                "unit that built a constant-intensity relationship can be "
-                "re-fitted.",
-                field="functional_form",
-                value=surrogate.functional_form,
+                f"Fitted relationship names input {name!r}, which is not a "
+                f"variable on {self.name!r}.",
+                field=field,
+                value=name,
             )
-        if surrogate.functional_form != "linear":
-            raise FlexConfigError(
-                f"Functional form {surrogate.functional_form!r} is reserved for "
-                "post-v0; use 'constant_intensity' or 'linear'.",
-                field="functional_form",
-                value=surrogate.functional_form,
-            )
+        return var
 
-        tb = self._find_time_block()
-        power = self.find_component(power_name)
-        inputs = []
-        for input_name in surrogate.input_variables:
-            var = self.find_component(input_name)
-            if var is None:
+    def register_relation(self, constraint, target) -> None:
+        """Declare ``constraint`` swappable: a relationship determining ``target``.
+
+        Only a *registered* relationship may ever be swapped by
+        :meth:`swap_relation` — a mass balance or other conservation law that
+        is never registered can never be swapped, by construction (there is no
+        naming convention to accidentally satisfy).
+        :meth:`add_constant_intensity_relation` registers the relation it
+        builds; a unit with its own performance relationship (an RO skid's
+        ``split_definition``, a tank's ``level_definition``) registers it the
+        same way.
+
+        Args:
+            constraint: The live, time-indexed Constraint to declare swappable.
+            target: The live Var/Reference it determines. Must be indexed over
+                exactly one dimension (time); a target indexed over more (a
+                per-component flux, say) is out of scope for this milestone.
+
+        Raises:
+            FlexConfigError: If ``target``'s index set is not one-dimensional.
+        """
+        if target.index_set().dimen != 1:
+            raise FlexConfigError(
+                f"register_relation requires a one-dimensional target, got "
+                f"{target.local_name!r} with dimen={target.index_set().dimen}. "
+                "A relationship over a multi-dimensional target (e.g. per "
+                "component) is out of scope for this milestone — see "
+                "M10b_parameterize_multicomponent.",
+                field="target",
+                value=target.local_name,
+            )
+        self._io_registry.relations.append(
+            RelationRecord(
+                constraint=constraint,
+                name=constraint.local_name,
+                target=target,
+                target_name=target.local_name,
+            )
+        )
+
+    def swap_relation(self, relation_name: str, surrogate: Surrogate) -> None:
+        """Replace a registered relationship in place, from a surrogate.
+
+        Deactivates the named relation (never deletes it — conventions §9),
+        deactivates whatever an earlier swap's builder attached, and adds
+        ``{relation_name}_fitted`` built from ``surrogate``, reusing the unit's
+        existing registered variables so ports and arcs are untouched. One
+        implementation, every caller: construction-time
+        (:meth:`add_constant_intensity_relation`, via a config's
+        ``SurrogateSpec``), runtime (``flexparameterize.apply_to_model``), and
+        any unit that hand-builds and registers its own relationship.
+
+        ``surrogate`` (a :class:`~flexops.surrogates.base.Surrogate`, e.g.
+        :class:`~flexops.surrogates.multilinear.MultilinearSurrogate`) is
+        already validated; :meth:`~flexops.surrogates.base.Surrogate.build`
+        does the rest — it returns ``body(t)``, a units-carrying Pyomo
+        expression in the surrogate's own declared output units for that time
+        point, or ``pyomo.environ.Constraint.Skip`` to omit it (a
+        lagged/state-space form uses this to skip horizon points where its lag
+        does not exist). ``body`` is converted into the registered target's
+        own units here, so a surrogate fitted in one unit basis attaches
+        cleanly to a target carrying another. A builder may attach its own
+        components to ``unit`` (an auxiliary Var/Constraint a big-M or
+        state-space form needs); this method finds and tracks them itself, so
+        nothing needs to be returned besides ``body``. Registering another
+        relationship shape is a new class in ``flexops.surrogates``, never a
+        config-schema change.
+
+        Args:
+            relation_name: Local name of a relation this unit registered via
+                :meth:`register_relation` (e.g. ``"power_electrical_relation"``,
+                ``"split_definition"``).
+            surrogate: The :class:`~flexops.surrogates.base.Surrogate` to
+                attach (see
+                :func:`~flexops.surrogates.surrogates.surrogate_from_spec`).
+
+        Raises:
+            FlexConfigError: If ``relation_name`` was never registered, or a
+                declared input variable is not found on the unit.
+        """
+        record = next(
+            (r for r in self._io_registry.relations if r.name == relation_name), None
+        )
+        if record is None:
+            known = (
+                ", ".join(repr(r.name) for r in self._io_registry.relations) or "none"
+            )
+            raise FlexConfigError(
+                f"{relation_name!r} is not a registered relation on "
+                f"{self.name!r} (registered: {known}).",
+                field="relation_name",
+                value=relation_name,
+            )
+        for name in surrogate.input_variables:
+            self.resolve_variable(name, field="input_variables")
+
+        (record.fitted if record.fitted is not None else record.constraint).deactivate()
+        for component in record.components:
+            deactivate = getattr(component, "deactivate", None)
+            if deactivate is not None:
+                deactivate()
+
+        before = set(self.component_map())
+        body = surrogate.build(self, record.target)
+        record.components = [
+            self.find_component(name) for name in set(self.component_map()) - before
+        ]
+
+        record.swap_count += 1
+        suffix = "" if record.swap_count == 1 else f"_{record.swap_count}"
+        fitted_name = f"{relation_name}_fitted{suffix}"
+        target = record.target
+
+        def _rule(b, t, _body=body, _target=target):
+            expr = _body(t)
+            if expr is pyo.Constraint.Skip:
+                return pyo.Constraint.Skip
+            try:
+                converted = pyunits.convert(expr, pyunits.get_units(_target[t]))
+            except UnitsError as exc:
                 raise FlexConfigError(
-                    f"Fitted relationship names input {input_name!r}, which is "
-                    f"not a variable on {self.name!r}.",
-                    field="input_variables",
-                    value=input_name,
-                )
-            inputs.append((surrogate.coefficients.get(input_name, 0.0), var))
-        intercept = surrogate.coefficients.get("intercept", 0.0)
+                    f"{type(surrogate).__name__}'s output units are "
+                    f"incompatible with {_target.local_name!r}'s "
+                    f"({pyunits.get_units(_target[t])!s}).",
+                    field="output_variables",
+                ) from exc
+            return _target[t] == converted
 
-        relation.deactivate()
         self.add_component(
-            f"{power_name}_relation_fitted",
+            fitted_name,
             pyo.Constraint(
-                tb.time_index,
-                rule=lambda b, t: power[t]
-                == (
-                    intercept
-                    + sum(
-                        coef * var[t] / pyunits.get_units(var[t])
-                        for coef, var in inputs
-                    )
-                )
-                * pyunits.kW,
-                doc="Fitted energy relationship (linear), replacing the "
-                f"deactivated {power_name}_relation. Coefficients are in kW "
-                "over each input's own units.",
+                target.index_set(),
+                rule=_rule,
+                doc=f"Fitted relationship ({type(surrogate).__name__}), "
+                f"replacing the deactivated {relation_name}. The surrogate's "
+                f"own output units are converted into {target.local_name!r}'s.",
             ),
         )
+        record.fitted = self.find_component(fitted_name)
+        assert record.fitted is not None, "Fitted constraint was not added to the unit."
 
     # -- in-place parameter updates (FlexParameterize 2-way, §5) -----------
 

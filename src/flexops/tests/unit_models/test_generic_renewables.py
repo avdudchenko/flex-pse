@@ -6,9 +6,13 @@ from pyomo.environ import units as pyunits
 
 from flexcore import nomenclature as nm
 from flexcore.exceptions import FlexConfigError
+from flexops.surrogates import MultilinearSurrogate
 from flexops.testing import UnitModelTestHarness, dummy_time_block
 from flexops.unit_models import GenericRenewables
 from flexops.unit_models.powergeneration.generic_renewables import RenewableTechnology
+
+_INTERCEPT = 1.0
+_SLOPE = 8.0
 
 
 def _generic_renewables(n: int = 3, **kwargs):
@@ -18,6 +22,26 @@ def _generic_renewables(n: int = 3, **kwargs):
     kwargs.setdefault("capacity_factor", [0.2, 0.5, 0.8][:n])
     m.unit = GenericRenewables(**kwargs)
     return m, m.unit
+
+
+def _surrogate_on(m, unit) -> MultilinearSurrogate:
+    """Attach an exogenous ``irradiance`` signal and fit ``power_generated`` to it.
+
+    The unit's own components are ``capacity`` (scalar) and its two power Vars,
+    so a realistic swapped-in relationship needs a time-indexed driver put on
+    the unit first -- an irradiance or wind-speed signal, the way a fitted
+    output curve would be parameterized.
+    """
+    unit.irradiance = pyo.Var(
+        m.time_block.time_index, initialize=0.5, units=pyunits.dimensionless
+    )
+    return MultilinearSurrogate(
+        {
+            "input_variables": {"irradiance": "dimensionless"},
+            "output_variables": {"power_generated": "kW"},
+            "coefficients": {"intercept": _INTERCEPT, "irradiance": _SLOPE},
+        }
+    )
 
 
 class TestGenericRenewablesArrayCapacityFactor(UnitModelTestHarness):
@@ -52,12 +76,12 @@ class TestGenericRenewablesIndexedCapacityFactor(UnitModelTestHarness):
 
 @pytest.mark.unit
 def test_generic_renewables_power_relation_body_array_capacity_factor():
-    """power_electrical_relation body is 0 at -capacity_factor[t] * capacity."""
+    """power_electrical_relation body is 0 at capacity_factor[t] * capacity."""
     _, unit = _generic_renewables(
         3, capacity=20 * pyunits.kW, capacity_factor=[0.1, 0.4, 1.0]
     )
     for t, cf in zip(range(3), (0.1, 0.4, 1.0), strict=True):
-        unit.power_electrical[t].fix(-cf * 20.0)
+        unit.power_generated[t].fix(cf * 20.0)
         assert pyo.value(unit.power_electrical_relation[t].body) == pytest.approx(
             0.0, abs=1e-9
         )
@@ -72,7 +96,7 @@ def test_generic_renewables_indexed_capacity_factor_is_a_live_reference():
         m.cf[t].fix(0.3)
     m.unit = GenericRenewables(capacity=10 * pyunits.kW, capacity_factor=m.cf)
 
-    m.unit.power_electrical[0].fix(-3.0)
+    m.unit.power_generated[0].fix(3.0)
     assert pyo.value(m.unit.power_electrical_relation[0].body) == pytest.approx(
         0.0, abs=1e-9
     )
@@ -89,6 +113,85 @@ def test_generic_renewables_power_electrical_is_an_export():
     _, unit = _generic_renewables(3)
     for t in range(3):
         assert unit.power_electrical[t].ub == pytest.approx(0.0)
+
+
+@pytest.mark.unit
+def test_generic_renewables_power_generated_is_non_negative():
+    """power_generated[t] -- the relation's target -- is bounded below at 0."""
+    _, unit = _generic_renewables(3)
+    for t in range(3):
+        assert unit.power_generated[t].lb == pytest.approx(0.0)
+        assert unit.power_generated[t].ub is None
+
+
+@pytest.mark.unit
+def test_generic_renewables_sign_constraint_ties_export_to_generation():
+    """power_electrical_sign holds exactly when power == -power_generated."""
+    _, unit = _generic_renewables(3)
+    for t in range(3):
+        unit.power_generated[t].fix(4.0)
+        unit.power_electrical[t].fix(-4.0)
+        assert pyo.value(unit.power_electrical_sign[t].body) == pytest.approx(
+            0.0, abs=1e-9
+        )
+        unit.power_electrical[t].fix(4.0)
+        assert pyo.value(unit.power_electrical_sign[t].body) != pytest.approx(
+            0.0, abs=1e-9
+        )
+
+
+@pytest.mark.unit
+def test_generic_renewables_sign_constraint_is_not_swappable():
+    """Only the magnitude relation is registered, so only it can be swapped."""
+    m, unit = _generic_renewables(3)
+    registered = {record.name for record in unit._io_registry.relations}
+    assert registered == {"power_electrical_relation"}
+    assert unit.find_component("power_electrical_sign") is not None
+    with pytest.raises(FlexConfigError) as excinfo:
+        unit.swap_relation("power_electrical_sign", _surrogate_on(m, unit))
+    assert excinfo.value.field == "relation_name"
+
+
+@pytest.mark.unit
+def test_generic_renewables_relation_targets_the_generation_magnitude():
+    """The registered relation determines power_generated, not the draw."""
+    _, unit = _generic_renewables(3)
+    record = next(
+        r for r in unit._io_registry.relations if r.name == "power_electrical_relation"
+    )
+    assert record.target is unit.power_generated
+
+
+@pytest.mark.unit
+def test_generic_renewables_registers_power_generated_as_its_io_output():
+    """The regressed output is the magnitude, so a fit carries the model's sign."""
+    _, unit = _generic_renewables(3)
+    outputs = {
+        record.var.local_name
+        for record in unit._io_registry.io_variables
+        if record.role == "output"
+    }
+    assert "power_generated" in outputs
+    assert "power_electrical" not in outputs
+
+
+@pytest.mark.unit
+def test_generic_renewables_swapped_relation_feeds_the_magnitude():
+    """A swapped-in relationship determines power_generated; the sign still exports."""
+    m, unit = _generic_renewables(3)
+    unit.swap_relation("power_electrical_relation", _surrogate_on(m, unit))
+
+    assert not unit.power_electrical_relation[0].active
+    assert unit.power_electrical_sign[0].active
+    fitted = unit.power_electrical_relation_fitted
+    for t in range(3):
+        unit.irradiance[t].fix(0.5)
+        unit.power_generated[t].fix(_INTERCEPT + 0.5 * _SLOPE)
+        unit.power_electrical[t].fix(-(_INTERCEPT + 0.5 * _SLOPE))
+        assert pyo.value(fitted[t].body) == pytest.approx(0.0, abs=1e-9)
+        assert pyo.value(unit.power_electrical_sign[t].body) == pytest.approx(
+            0.0, abs=1e-9
+        )
 
 
 @pytest.mark.unit
@@ -180,6 +283,48 @@ def test_generic_renewables_rejects_wrong_length_indexed_capacity_factor():
     assert excinfo.value.field == "capacity_factor"
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("capacity_factor", [[-0.1, 0.5, 0.8], [0.2, 0.5, 1.4]])
+def test_generic_renewables_rejects_out_of_range_array_capacity_factor(capacity_factor):
+    """A capacity factor below 0 or above 1 is not a fraction of nameplate."""
+    with pytest.raises(FlexConfigError) as excinfo:
+        _generic_renewables(3, capacity_factor=capacity_factor)
+    assert excinfo.value.field == "capacity_factor"
+
+
+@pytest.mark.unit
+def test_generic_renewables_accepts_the_range_endpoints():
+    """0 (dark/becalmed) and 1 (at nameplate) are both legitimate."""
+    _, unit = _generic_renewables(
+        3, capacity=10 * pyunits.kW, capacity_factor=[0.0, 0.5, 1.0]
+    )
+    for t, cf in zip(range(3), (0.0, 0.5, 1.0), strict=True):
+        unit.power_generated[t].fix(cf * 10.0)
+        assert pyo.value(unit.power_electrical_relation[t].body) == pytest.approx(
+            0.0, abs=1e-9
+        )
+
+
+@pytest.mark.unit
+def test_generic_renewables_rejects_out_of_range_indexed_capacity_factor():
+    """A live reference is range-checked over the values it carries at build."""
+    m = dummy_time_block(3)
+    m.cf = pyo.Var(m.time_block.time_index, initialize=0.5)
+    m.cf[1].set_value(1.5)
+    with pytest.raises(FlexConfigError) as excinfo:
+        m.unit = GenericRenewables(capacity=10 * pyunits.kW, capacity_factor=m.cf)
+    assert excinfo.value.field == "capacity_factor"
+
+
+@pytest.mark.unit
+def test_generic_renewables_skips_an_uninitialized_capacity_factor_member():
+    """An uninitialized member of a live reference is skipped, not guessed at."""
+    m = dummy_time_block(3)
+    m.cf = pyo.Var(m.time_block.time_index)
+    m.unit = GenericRenewables(capacity=10 * pyunits.kW, capacity_factor=m.cf)
+    assert m.unit.find_component("power_electrical_relation") is not None
+
+
 # -- technology (placeholder) -------------------------------------------------
 
 
@@ -219,7 +364,7 @@ def test_generic_renewables_technology_is_not_yet_used_in_the_power_relation():
     )
     for t, cf in zip(range(3), (0.2, 0.5, 0.8), strict=True):
         for unit in (solar_unit, wind_unit):
-            unit.power_electrical[t].fix(-cf * 10.0)
+            unit.power_generated[t].fix(cf * 10.0)
             assert pyo.value(unit.power_electrical_relation[t].body) == pytest.approx(
                 0.0, abs=1e-9
             )

@@ -112,9 +112,12 @@ live only in imperative code — if it can be configured, it is in the file.
 - Pydantic v2 models in `config/schema.py` are the **schema authority**:
   - `IOVariableSpec` — name, role (`input`/`output`), units, tag hint,
     time-indexed flag.
-  - `SurrogateSpec` — functional form (`constant_intensity`, `linear`, reserved:
-    `nn`, `arima`, `multiconvex`), coefficients, input/output variable names,
-    `provenance` (fit metrics, data window, tool versions).
+  - `SurrogateSpec` — a `SurrogateType` (`constant_intensity`, `multilinear`,
+    reserved: `quadratic`, `exponential`, `arima`, `neural_network`) and an
+    opaque `data` mapping in the shape that type's `flexops.surrogates` class
+    defines and validates (its own input/output variables and their units,
+    coefficients, etc.), plus `provenance` (fit metrics, data window, tool
+    versions).
   - `UnitConfig` — unit-model class name, construction options, IO specs,
     optional `SurrogateSpec`, optional logic/UC block (§3.5), optional external
     dispatch source (§3.6).
@@ -314,8 +317,8 @@ physical subclasses add the flow↔energy relationship and any bounds.
 | `BatteryModel` | `OpsBlockData` (no fluid ports) | SOC dynamics, charge/discharge power + efficiency, capacity as fixable design var; optional mutually-exclusive charge/discharge binary; first-class `external_dispatch` (DERMS, §3.6) |
 | `ConstantEnergyIntensityModel` | `SISOBlock` | generic "energy factor × flow" unit — the default building block for anything without a bespoke physical topology (e.g. a whole plant modeled as a single surrogate, as in the api-freeze script's `waterfacility.plant`) |
 
-The general pattern (the platform's core idea): a unit model defines flows in/out (its topology) and energy draw; **every unit defaults to a constant energy-intensity relationship**. FlexParameterize (§5) is what upgrades that relationship to a fitted linear/multiconvex/NN/ARIMA form — by swapping the
-unit's energy-relationship constraint in place, not by introducing a different unit class. These are usually energy relationships but can also modify the input/output relationship for quantities like biogas production, salt and permeate flux, etc., not by introducing a different unit class. Same base topology, controllable functional form. `Tank` inheriting `SISOBlock` but *disabling* logic constraints is the canonical example of a physical subclass turning off a base capability.
+The general pattern (the platform's core idea): a unit model defines flows in/out (its topology) and energy draw; **every unit defaults to a constant energy-intensity relationship**. FlexParameterize (§5) is what upgrades that relationship to a fitted multilinear/exponential/NN/ARIMA form (a `flexops.surrogates.Surrogate` class, only `multilinear` implemented so far) — by swapping the
+unit's energy-relationship constraint in place, not by introducing a different unit class. These are usually energy relationships but can also modify the input/output relationship for quantities like biogas production, salt and permeate flux, etc., not by introducing a different unit class. Same base topology, controllable relationship class. `Tank` inheriting `SISOBlock` but *disabling* logic constraints is the canonical example of a physical subclass turning off a base capability.
 
 #### Choosing a base class for a new unit model
 
@@ -488,17 +491,21 @@ Pipeline: **tabular data → tag aliasing → sufficiency validation → regress
   supported; validation checks each.
 - `regression/base.py`: `Regressor` Protocol — `fit(X, y) -> FitResult`,
   `to_surrogate_spec() -> SurrogateSpec`. `constant.py` (mean energy intensity),
-  `linear.py` (sklearn, behind the `[parameterize]` extra). NN/ARIMA/multiconvex
-  are post-v0 implementations of the same protocol.
+  `linear.py` (sklearn, behind the `[parameterize]` extra). A regressor for a
+  richer `SurrogateType` (multilinear, neural-network, ARIMA) is a post-v0
+  implementation of the same protocol; it need not exist for that type's
+  `flexops.surrogates` class to be usable with a hand-built `SurrogateSpec`
+  (§3.4) — fitting and building are separate concerns.
 - `apply.py` (**the FlexParameterize → FlexOps direction**): `apply_to_model(
   model, data, tagmap)` — for each fitted unit, **fix regressed parameters in
   place** and, where the fit produces a richer relationship than the unit's
   default constant intensity, **swap the energy-relationship constraint in
   place**: deactivate the unit's default equality constraint and construct a new
-  one from the fitted `SurrogateSpec`, reusing the same registered IO variables
-  (ports and arcs are untouched — there is no block to replace and nothing to
-  reconnect). FlexOps provides the constraint-swap hook on `OpsBlockData`;
-  FlexParameterize drives it. This is why the coupling is two-way even though
+  one from the fitted `SurrogateSpec`, realized as a `flexops.surrogates.Surrogate`
+  and reusing the same registered IO variables (ports and arcs are untouched —
+  there is no block to replace and nothing to reconnect). FlexOps provides the
+  constraint-swap hook on `OpsBlockData`; FlexParameterize drives it. This is
+  why the coupling is two-way even though
   the import is one-way.
 - `emit.py` (**the serializable direction**): fitted result + model identity →
   `ModelConfig`/`UnitConfig` (with `provenance`: fit metrics, data window,
@@ -549,5 +556,5 @@ Pipeline: **tabular data → tag aliasing → sufficiency validation → regress
 | R8 | Customizable unit commitment: `status` base, optional startup/shutdown/dwell/delays/conditional; parallel-train degeneracy detection is model-level, not per-unit | a unit can't see its siblings, so symmetry-breaking lives above the unit; everything else is opt-in per unit |
 | R9 | Never report the solver objective as the user-facing result; report EECO's post-solve cost; battery/all units accept external (DERMS) dispatch commands | objective is relaxed/scalarized; third-party-controlled assets need their dispatch fixed from outside |
 | R10 | FlexParameterize↔FlexOps coupling is two-way at runtime (FlexOps builds containers; FlexParameterize fixes params and swaps a unit's energy-relationship constraint in place) though the import stays one-way | matches how parameterization actually works; keeps the layering + serialized-config split seam intact |
-| R11 | Every unit defaults to a constant energy-intensity relationship; there is no separate `LinearRegressionModel` unit class — FlexParameterize upgrades a unit's relationship via an in-place constraint swap, reusing the same registered IO variables | keeps the unit library small and one generic class (`ConstantEnergyIntensityModel`) covers anything without a bespoke physical topology; regression sophistication is FlexParameterize's concern, not FlexOps' |
+| R11 | Every unit defaults to a constant energy-intensity relationship; there is no separate `LinearRegressionModel` unit class — a relationship is upgraded via an in-place constraint swap to a `flexops.surrogates.Surrogate` (a predefined class per `SurrogateType`, e.g. `MultilinearSurrogate`; `flexops` imports no sibling package, so the classes live in `flexops.surrogates`, not `flexparameterize`), reusing the same registered IO variables | keeps the unit library small and one generic class (`ConstantEnergyIntensityModel`) covers anything without a bespoke physical topology; relationship-structure sophistication is a swap, not a new unit class, and stays inside `flexops` so it is realizable at config-build time |
 | R12 | No compat/isolation layer or import-linter whitelist for `idaes`/`pyomo`/`eeco`; import them directly, pin exact versions in `pyproject.toml`, and have maintainers bump them manually (~quarterly) after tests pass | a re-export whitelist guards only cheap import-path drift, not semantic drift; standard pinning is simpler and the sibling project (WaterTAP) imports `idaes` directly. Collecting `eeco` calls in `costing/opex.py` stays a convention, not an enforced boundary |

@@ -9,6 +9,7 @@ from flexcore.config.io import (
     dump_model_config,
     export_json_schemas,
     load_model_config,
+    load_surrogate_source,
 )
 from flexcore.config.schema import (
     CURRENT_SCHEMA_VERSION,
@@ -20,6 +21,7 @@ from flexcore.config.schema import (
     PlantConfig,
     PriceSpec,
     SurrogateSpec,
+    SurrogateType,
     TimeConfig,
     UnitCommitmentConfig,
     UnitConfig,
@@ -36,10 +38,12 @@ def _model_config() -> ModelConfig:
             IOVariableSpec(name="flow_out", role="output", units="m^3/hr"),
         ],
         surrogate=SurrogateSpec(
-            functional_form="linear",
-            coefficients={"slope": 0.5, "intercept": 0.1},
-            input_variables=["flow_in"],
-            output_variables=["power_electrical"],
+            surrogate_type=SurrogateType.MULTILINEAR,
+            data={
+                "input_variables": {"flow_in": "m^3/hr"},
+                "output_variables": {"power_electrical": "kW"},
+                "coefficients": {"flow_in": 0.5, "intercept": 0.1},
+            },
         ),
     )
     plant_unit = UnitConfig(
@@ -158,6 +162,82 @@ def test_malformed_schema_version_raises(bad_version):
     data = _model_config().model_dump(mode="json")
     data["schema_version"] = bad_version
     with pytest.raises(FlexConfigError):
+        load_model_config(data)
+
+
+@pytest.mark.unit
+def test_older_schema_version_migrates_forward():
+    """A document at an older schema version loads and comes back re-stamped."""
+    data = _model_config().model_dump(mode="json")
+    data["schema_version"] = "0.0.1"
+
+    loaded = load_model_config(data)
+
+    assert loaded.schema_version == CURRENT_SCHEMA_VERSION
+
+
+@pytest.mark.unit
+def test_surrogate_type_rejects_an_unknown_name():
+    """Unlike the old open ``functional_form`` string, an unknown enum member
+    is rejected at config-validation time, not build time."""
+    with pytest.raises(ValidationError):
+        SurrogateSpec(surrogate_type="vendor_curve_v3")
+
+
+@pytest.mark.unit
+def test_load_surrogate_source_fills_in_the_spec(tmp_path):
+    """A sidecar file supplies the data the spec did not inline."""
+    (tmp_path / "curve.json").write_text(
+        json.dumps({"data": {"coefficients": {"intercept": 1.0, "flow_out": 0.5}}})
+    )
+    spec = SurrogateSpec(surrogate_type=SurrogateType.MULTILINEAR, source="curve.json")
+
+    filled = load_surrogate_source(spec, tmp_path)
+
+    assert filled.data == {"coefficients": {"intercept": 1.0, "flow_out": 0.5}}
+    assert filled.source == "curve.json"
+    assert spec.data == {}
+
+
+@pytest.mark.unit
+def test_load_surrogate_source_rejects_a_non_json_sidecar(tmp_path):
+    """JSON is the only on-disk format for a surrogate sidecar too."""
+    spec = SurrogateSpec(surrogate_type=SurrogateType.MULTILINEAR, source="curve.yaml")
+    with pytest.raises(FlexConfigError, match="curve.yaml"):
+        load_surrogate_source(spec, tmp_path)
+
+
+@pytest.mark.unit
+def test_load_model_config_resolves_a_surrogate_source(tmp_path):
+    """A config's surrogate source resolves against the config's own directory."""
+    cfg = _model_config()
+    data = cfg.model_dump(mode="json")
+    data["plant"]["units"]["tank"]["surrogate"] = {
+        "surrogate_type": "multilinear",
+        "source": "curve.json",
+    }
+    (tmp_path / "model.json").write_text(json.dumps(data))
+    (tmp_path / "curve.json").write_text(
+        json.dumps({"data": {"coefficients": {"flow_out": 0.25}}})
+    )
+
+    loaded = load_model_config(tmp_path / "model.json")
+
+    assert loaded.plant.units["tank"].surrogate.data == {
+        "coefficients": {"flow_out": 0.25}
+    }
+
+
+@pytest.mark.unit
+def test_older_schema_version_with_a_surrogate_is_rejected():
+    """A 0.0.2 config naming a surrogate cannot be mechanically migrated."""
+    data = _model_config().model_dump(mode="json")
+    data["schema_version"] = "0.0.2"
+    data["plant"]["units"]["tank"]["surrogate"] = {
+        "functional_form": "linear",
+        "coefficients": {"flow_in": 0.5},
+    }
+    with pytest.raises(FlexConfigError, match="surrogate"):
         load_model_config(data)
 
 

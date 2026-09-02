@@ -9,12 +9,30 @@ fixable nameplate ``capacity``:
 
 .. math::
 
-    P_{elec}[t] = -\text{capacity\_factor}[t] \cdot \text{capacity}
+    P_{gen}[t] = \text{capacity\_factor}[t] \cdot \text{capacity}
+
+    P_{elec}[t] = -P_{gen}[t]
 
 Like a discharging :class:`BatteryModel` or an exporting :class:`Combustor`,
-this is **negative** (export): ``power_electrical[t]`` is upper-bounded at 0,
-so plant aggregation (a plain sum) nets generation against load with no
+the draw is **negative** (export): ``power_electrical[t]`` is upper-bounded at
+0, so plant aggregation (a plain sum) nets generation against load with no
 per-unit sign flipping.
+
+The sign is a **separate constraint** from the relation, exactly as
+:class:`~flexops.unit_models.powergeneration.combustor.Combustor` splits them.
+``power_generated[t]`` holds the non-negative generation magnitude and is the
+registered relation's target; ``power_electrical_sign[t]`` negates it into the
+draw and is deliberately never registered, so no surrogate swap can replace it
+(see :meth:`~flexops.core.ops_block.OpsBlockData.register_relation`). Nothing
+can prove an arbitrary swapped-in surrogate body is non-positive over the
+feasible region, so the export convention rests on the target's own lower
+bound of 0 instead: a fitted relationship predicting a negative export
+violates a bound naming the quantity it got wrong, rather than silently
+conflicting with ``power_electrical``'s upper bound. That also means a
+surrogate for this unit is fitted in generation-magnitude space -- positive,
+the convention generation data is normally logged in -- which is why
+``power_generated`` rather than ``power_electrical`` is the registered IO
+output.
 
 ``capacity_factor`` accepts exactly two forms, checked once the model's
 :class:`~flexops.core.time_block.TimeBlockData` (and hence its horizon length)
@@ -33,6 +51,13 @@ the whole point of this unit is a timeseries, not a broadcast constant.
 ``FlexCosting``'s ``energy_prices``, it is exogenous data feeding an
 expression, not a decision Var this unit owns.
 
+Every value must lie in **[0, 1]** -- a capacity factor is a fraction of
+nameplate: below 0 would make the unit a load, above 1 would export more than
+the capacity the plant is sized and costed for. An array-like is checked
+entrywise; a live Pyomo reference is checked at construction over the values
+it carries then (an uninitialized member is skipped, and holding a later
+assignment in range is that component's own bounds' job, not this unit's).
+
 ``technology`` (``"solar"``/``"wind"``/``None``) is a **placeholder**: it is
 stored on the config and nowhere else consumed by this unit's own build
 logic. It is reserved for a future costing-function selection (different
@@ -48,9 +73,10 @@ from pyomo.common.config import ConfigValue
 from pyomo.environ import units as pyunits
 
 from flexcore import nomenclature as nm
-from flexcore.config.schema import UnitCommitmentConfig
+from flexcore.config.schema import SurrogateType, UnitCommitmentConfig
 from flexcore.exceptions import FlexConfigError
 from flexops.core.ops_block import OpsBlockData
+from flexops.surrogates import surrogate_from_spec
 
 
 class RenewableTechnology(enum.StrEnum):
@@ -79,6 +105,43 @@ def _technology_domain(value):
         ) from exc
 
 
+def _checked_capacity_factor_range(terms: list) -> list:
+    """Reject any capacity-factor term that evaluates outside ``[0, 1]``.
+
+    A capacity factor is a fraction of nameplate: below 0 would make the unit
+    a load, above 1 would export more than the capacity the plant is sized and
+    costed for. A term that cannot be evaluated -- an uninitialized member of
+    a live Pyomo reference -- is skipped rather than guessed at; holding a
+    later assignment in range is that component's own bounds' job.
+
+    Args:
+        terms: The per-time-point terms, in time-index order.
+
+    Returns:
+        ``terms``, unchanged.
+
+    Raises:
+        FlexConfigError: If a term evaluates to a value outside ``[0, 1]``.
+    """
+    for position, term in enumerate(terms):
+        try:
+            magnitude = pyo.value(term)
+        except (ValueError, TypeError):
+            continue
+        if magnitude is None:
+            continue
+        if not 0.0 <= magnitude <= 1.0:
+            raise FlexConfigError(
+                f"capacity_factor[{position}] is {magnitude!r}, outside "
+                "[0, 1]. A capacity factor is a fraction of nameplate: "
+                "below 0 is a load, above 1 exports past the capacity the "
+                "plant is sized for.",
+                field="capacity_factor",
+                value=magnitude,
+            )
+    return terms
+
+
 def _capacity_factor_terms(value, n_points: int) -> list:
     """Validate and normalize ``capacity_factor`` into ``n_points`` per-step terms.
 
@@ -105,8 +168,9 @@ def _capacity_factor_terms(value, n_points: int) -> list:
 
     Raises:
         FlexConfigError: If ``value`` is a scalar (a bare number or an
-            unindexed Pyomo component) rather than a timeseries, or does not
-            carry exactly ``n_points`` values.
+            unindexed Pyomo component) rather than a timeseries, does not
+            carry exactly ``n_points`` values, or carries an evaluable value
+            outside ``[0, 1]`` (see :func:`_checked_capacity_factor_range`).
     """
     is_indexed = getattr(value, "is_indexed", None)
     if callable(is_indexed):
@@ -128,7 +192,7 @@ def _capacity_factor_terms(value, n_points: int) -> list:
                 field="capacity_factor",
                 value=value,
             )
-        return [value[i] for i in index]
+        return _checked_capacity_factor_range([value[i] for i in index])
     if not isinstance(value, Sized) or isinstance(value, (str, bytes)):
         raise FlexConfigError(
             "capacity_factor must be an array-like of length T (one value "
@@ -145,7 +209,7 @@ def _capacity_factor_terms(value, n_points: int) -> list:
             field="capacity_factor",
             value=value,
         )
-    return list(value)
+    return _checked_capacity_factor_range(list(value))
 
 
 @declare_process_block_class("GenericRenewables")
@@ -163,7 +227,7 @@ class GenericRenewablesData(OpsBlockData):
         associates it with design/operations mode toggling).
         ``capacity_factor`` (required): the timeseries production profile, an
         array-like or time-indexed Pyomo component of length equal to the
-        horizon (see module docstring).
+        horizon, every value in ``[0, 1]`` (see module docstring).
         ``technology`` (default ``None``): ``"solar"`` or ``"wind"`` -- a
         placeholder, not yet consumed by ``build()`` (see module docstring).
 
@@ -191,8 +255,9 @@ class GenericRenewablesData(OpsBlockData):
         "capacity_factor",
         ConfigValue(
             description="Timeseries production profile: an array-like of "
-            "length T, or a time-indexed Pyomo Var/Param of length T "
-            "(validated against the horizon in build()). Required.",
+            "length T, or a time-indexed Pyomo Var/Param of length T, every "
+            "value a fraction of nameplate in [0, 1] (validated against the "
+            "horizon in build()). Required.",
         ),
     )
     CONFIG.declare(
@@ -247,23 +312,47 @@ class GenericRenewablesData(OpsBlockData):
         self._capacity_factor = dict(zip(tb.time_index, terms, strict=True))
 
         power = self.declare_power(nm.PowerKind.ELECTRICAL)
-        self.register_io_variable(power, role="output")
         for t in tb.time_index:
             power[t].setub(0.0)
+
+        self.power_generated = pyo.Var(
+            tb.time_index,
+            bounds=(0.0, None),
+            initialize=0.0,
+            units=pyunits.kW,
+            doc="Gross electrical generation magnitude (kW, non-negative). The "
+            "relation's target: its lower bound is what keeps a swapped-in "
+            "surrogate from predicting a negative export.",
+        )
+        self.register_io_variable(self.power_generated, role="output")
+
+        @self.Constraint(
+            tb.time_index,
+            doc="Sign convention: an export is a negative draw, "
+            "power_electrical == -power_generated. Deliberately not registered, "
+            "so no surrogate swap can replace it.",
+        )
+        def power_electrical_sign(b, t):
+            return power[t] == -b.power_generated[t]
 
         capacity_factor = self._capacity_factor
         capacity = self.capacity
 
         @self.Constraint(
             tb.time_index,
-            doc="power_electrical == -capacity_factor[t] * capacity; an "
-            "export (kW).",
+            doc="power_generated == capacity_factor[t] * capacity; the export "
+            "magnitude (kW).",
         )
         def power_electrical_relation(b, t):
-            return -power[t] == pyunits.convert(
+            return b.power_generated[t] == pyunits.convert(
                 capacity_factor[t] * capacity, pyunits.kW
             )
 
-        surrogate = getattr(self.config.flexops_config, "surrogate", None)
-        if surrogate is not None and surrogate.functional_form != "constant_intensity":
-            self.swap_energy_relation(surrogate, kind=nm.PowerKind.ELECTRICAL)
+        self.register_relation(
+            self.power_electrical_relation, target=self.power_generated
+        )
+        spec = getattr(self.config.flexops_config, "surrogate", None)
+        if spec is not None and (
+            spec.surrogate_type is not SurrogateType.CONSTANT_INTENSITY
+        ):
+            self.swap_relation("power_electrical_relation", surrogate_from_spec(spec))
