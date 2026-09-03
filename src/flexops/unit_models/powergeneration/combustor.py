@@ -1,10 +1,10 @@
-r"""Combustor(OpsBlockData): N gas inlets mixed into one flue-gas outlet (§3.2, §3.4).
+r"""Combustor(OpsBlockData): N fuel sources burned into one flue-gas outlet.
 
 Every unit model shipped so far moves water: each is built on a
 single-``property_package`` IO-topology base (``SISOBlock``/``SIDOBlock``/
 ``DIDOBlock``) that hardcodes the liquid phase. A combustor takes an
-**arbitrary number** of fuel-gas inlets -- natural gas, digester gas,
-supplemental gas streams -- burned into one flue-gas outlet, so no fixed-arity
+**arbitrary number** of fuel sources -- connected via inlet ports, pulled
+from utilities, or both -- burned into one flue-gas outlet, so no fixed-arity
 topology base fits (its port
 count is a config option, §3.4's "choosing a base class" question). It
 subclasses :class:`~flexops.core.ops_block.OpsBlockData` directly instead,
@@ -12,17 +12,17 @@ hand-writing its ports and balances, the way
 :class:`~flexops.unit_models.storage.battery.BatteryModel` does.
 
 Two flow-to-power relations, selected automatically (never configured
-directly) from whether every inlet was given a heating value. Both determine
+directly) from whether every fuel source was given a heating value. Both determine
 ``power_generated[t]``, the **non-negative** generation magnitude:
 
-* **Heating value** -- when every inlet in ``inlet_names`` has an entry in
+* **Heating value** -- when every fuel source (inlet and utility) has an entry in
   ``heating_values``:
 
   .. math::
 
       P_{gen}[t] = \eta \sum_i \text{HV}_i \cdot \dot{V}_i[t]
 
-* **Constant intensity** -- when no inlet has a heating value:
+* **Constant intensity** -- when no fuel source has a heating value:
 
   .. math::
 
@@ -52,13 +52,13 @@ fitted in generation-magnitude space -- positive, the convention generation
 data is normally logged in -- which is also why ``power_generated`` (not
 ``power_electrical``) is the unit's registered IO output.
 
-A partial ``heating_values`` mapping -- some but not all inlets named -- is
+A partial ``heating_values`` mapping -- some but not all fuel sources named -- is
 rejected rather than silently falling back to the constant-intensity relation,
 and an option the resolved relation would ignore (``efficiency`` under
 constant intensity, ``energy_intensity`` under heating value) is rejected too.
 
-**Combustion air is not a modeled inlet.** Every configured inlet is a fuel-gas
-stream; an IC unit entrains atmospheric air at roughly its design air-to-fuel
+**Combustion air is not a modeled inlet.** Every configured fuel source is a
+fuel-gas stream; an IC unit entrains atmospheric air at roughly its design air-to-fuel
 ratio, so the flue-gas volume is the fuel burned scaled up by the air that came
 with it:
 
@@ -75,7 +75,7 @@ which this volumetric balance does not track.
 
 .. note::
    Under the constant-intensity relation, ``energy_intensity`` is per unit
-   **total inlet volume**.
+   **total fuel volume** (inlet + utility).
 
 .. note::
    ``efficiency * heating_value_i`` is a product of fixed scalar Vars: linear
@@ -114,13 +114,13 @@ class CombustorPowerRelation(enum.StrEnum):
 
 
 def _inlet_names_domain(value) -> tuple[str, ...]:
-    """ConfigValue domain: coerce to a tuple.
+    """ConfigValue domain: coerce to a tuple, or accept None.
 
-    Only coerces the type; emptiness/uniqueness/non-empty-string checks
-    happen in :meth:`CombustorData._validate_inlet_names` instead, so they
-    raise :class:`FlexConfigError` directly rather than the ``ValueError``
-    Pyomo's ``ConfigValue`` wraps every domain-raised exception into.
+    ``None`` is a valid sentinel meaning "no inlets"; actual validation
+    happens in :meth:`CombustorData._validate_inlet_names`.
     """
+    if value is None:
+        return None
     return tuple(value)
 
 
@@ -160,30 +160,155 @@ def _efficiency_domain(value):
     )
 
 
+def _utility_fuel_source_domain(value):
+    """ConfigValue domain: None, a single fuel name, or a tuple of fuel names."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        result = tuple(value)
+        if not all(isinstance(v, str) and v for v in result):
+            raise FlexConfigError(
+                "utility_fuel_source must contain non-empty strings; "
+                f"got {result!r}.",
+                field="utility_fuel_source",
+                value=value,
+            )
+        return result
+    raise FlexConfigError(
+        "utility_fuel_source must be None, a string, or a list/tuple of "
+        f"strings; got {type(value).__name__}.",
+        field="utility_fuel_source",
+        value=value,
+    )
+
+
+def _blend_ratio_domain(value):
+    """ConfigValue domain: None, a single ratio dict, or a list of ratio dicts.
+
+    Each dict must be of the form ``{fuel_a: fuel_b, ratio: r}``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return (_validate_blend_ratio_mapping(value),)
+    if isinstance(value, (list, tuple)):
+        if not value:
+            raise FlexConfigError(
+                "blend_ratio must contain at least one ratio mapping; "
+                "got an empty list.",
+                field="blend_ratio",
+                value=value,
+            )
+        result = []
+        seen_pairs = set()
+        for idx, item in enumerate(value):
+            if not isinstance(item, Mapping):
+                raise FlexConfigError(
+                    "blend_ratio entries must be mappings; "
+                    f"entry {idx} is {type(item).__name__}.",
+                    field="blend_ratio",
+                    value=value,
+                )
+            validated = _validate_blend_ratio_mapping(item)
+            fuel_a = next(k for k in item if k != "ratio")
+            fuel_b = item[fuel_a]
+            pair = (fuel_a, fuel_b)
+            if pair in seen_pairs:
+                raise FlexConfigError(
+                    "blend_ratio contains duplicate pair "
+                    f"'{fuel_a}' -> '{fuel_b}'; each pair must be "
+                    "unique.",
+                    field="blend_ratio",
+                    value=item,
+                )
+            seen_pairs.add(pair)
+            result.append(validated)
+        return tuple(result)
+    raise FlexConfigError(
+        "blend_ratio must be None, a mapping, or a list/tuple of mappings; "
+        f"got {type(value).__name__}.",
+        field="blend_ratio",
+        value=value,
+    )
+
+
+def _validate_blend_ratio_mapping(item):
+    """Validate one blend_ratio mapping and return it as a plain dict."""
+    keys = set(item.keys())
+    if "ratio" not in keys:
+        raise FlexConfigError(
+            "Each blend_ratio mapping must contain a 'ratio' key.",
+            field="blend_ratio",
+            value=item,
+        )
+    non_ratio = keys - {"ratio"}
+    if len(non_ratio) != 1:
+        raise FlexConfigError(
+            "Each blend_ratio mapping must contain exactly one fuel pair "
+            "(one key mapping to the other fuel); got "
+            f"{len(non_ratio)} non-ratio entries: {sorted(non_ratio)}.",
+            field="blend_ratio",
+            value=item,
+        )
+    fuel_a = next(iter(non_ratio))
+    fuel_b = item[fuel_a]
+    if not isinstance(fuel_b, str) or not fuel_b:
+        raise FlexConfigError(
+            f"blend_ratio value for '{fuel_a}' must be a non-empty fuel name.",
+            field="blend_ratio",
+            value=item,
+        )
+    ratio = item["ratio"]
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or ratio <= 0:
+        raise FlexConfigError(
+            "blend_ratio 'ratio' must be a positive number; " f"got {ratio!r}.",
+            field="blend_ratio",
+            value=item,
+        )
+    return dict(item)
+
+
 @declare_process_block_class("Combustor")
 class CombustorData(OpsBlockData):
-    r"""N fuel-gas inlets burned into one flue-gas outlet, exporting power.
+    r"""N fuel sources burned into one flue-gas outlet, exporting power.
 
     See the module docstring for both flow-to-power relations and the
-    documented simplifications. ``inlet_names`` sets the inlet count and their
-    port names (``f"inlet_{name}"``); ``heating_values`` (a mapping of inlet
-    name to a heating value) selects between them.
+    documented simplifications. ``inlet_names`` sets the inlet port count and their
+    port names (``f"inlet_{name}"``); ``utility_fuel_source`` names fuels pulled
+    from utilities rather than connected via inlet ports. ``heating_values`` maps
+    every fuel name -- inlet or utility -- to a heating value and selects the
+    relation.
 
     Config:
         ``property_package`` (inherited): a single-phase
         :class:`~flexops.properties.simple_gas.SimpleGasFlow`-shaped package
-        shared by every port. ``inlet_names`` (default ``("fuel",)``):
-        the inlets' role/port names. ``heating_values`` (default ``None``):
-        mapping of inlet name to its lower heating value per unit volume;
-        supplying one for every inlet selects the heating-value relation,
-        ``None``/empty selects constant intensity, anything in between raises.
-        ``efficiency`` (default 0.35): electrical conversion efficiency,
-        heating-value relation only. ``energy_intensity`` (default 2.0
-        kWh/m^3): electrical output per unit total inlet volume, constant-
-        intensity relation only. ``air_to_fuel_ratio`` (default 9.5): volumes of
-        combustion air entrained per unit volume of fuel gas, which sets the
-        flue-gas volume. ``flue_gas_temperature`` (default 750 K): the outlet
-        temperature.
+        shared by every port. ``inlet_names`` (default ``None``): the inlets'
+        role/port names. Pass ``None`` or ``()`` for no inlets (requires
+        ``utility_fuel_source``); pass a non-empty tuple of unique strings
+        to enable inlet-connected combustion. ``heating_values`` (default
+        ``None``): mapping of fuel name to its lower heating value per unit
+        volume; supplying one for every fuel source (inlet and utility) selects the
+        heating-value relation, ``None``/empty selects constant intensity,
+        anything in between raises. ``efficiency`` (default 0.35): electrical
+        conversion efficiency, heating-value relation only.
+        ``energy_intensity`` (default 2.0 kWh/m^3): electrical output per
+        unit total fuel volume, constant-intensity relation only.
+        ``air_to_fuel_ratio`` (default 9.5): volumes of combustion air
+        entrained per unit volume of fuel gas, which sets the flue-gas
+        volume. ``flue_gas_temperature`` (default 750 K): the outlet
+        temperature. ``utility_fuel_source`` (default ``None``): fuel names
+        pulled from utilities rather than connected via inlet ports; accepts
+        a single name or a list of names. These names are independent of
+        ``inlet_names`` and must not overlap with them. Their heating values
+        are declared in the same ``heating_values`` mapping. ``blend_ratio``
+        (default ``None``): optional dict or list of dicts of the form
+        ``{fuel_a: fuel_b, ratio: r}`` enforcing
+        ``flow_fuel_a[t] == flow_fuel_b[t] * r``; both fuel names must be
+        known inlets or utility fuel sources, and ``r`` must be positive.
+        Pass a list to define multiple independent ratio constraints among
+        the same fuels.
 
     Example:
         >>> from pyomo.environ import units as pyunits
@@ -206,10 +331,12 @@ class CombustorData(OpsBlockData):
     CONFIG.declare(
         "inlet_names",
         ConfigValue(
-            default=("fuel",),
+            default=None,
             domain=_inlet_names_domain,
             description="Role names of the combustor's gas inlets; inlet i is "
-            "built as port f'inlet_{name}'. Must be unique and non-empty.",
+            "built as port f'inlet_{name}'. Must be unique and non-empty when "
+            "given. Defaults to None, meaning no inlet ports are built; "
+            "provide at least one name to enable inlet-connected combustion.",
         ),
     )
     CONFIG.declare(
@@ -217,10 +344,11 @@ class CombustorData(OpsBlockData):
         ConfigValue(
             default=None,
             domain=_heating_values_domain,
-            description="Mapping of inlet name to its lower heating value per "
-            "unit volume (a fixed, regressable Var per inlet once built, "
-            "kWh/m^3). A value for every inlet in inlet_names selects the "
-            "heating-value power relation; None or empty selects the "
+            description="Mapping of fuel name to its lower heating value per "
+            "unit volume (a fixed, regressable Var per fuel once built, "
+            "kWh/m^3). A value for every fuel source -- both inlets in "
+            "``inlet_names`` and names in ``utility_fuel_source`` -- selects "
+            "the heating-value power relation; None or empty selects the "
             "constant-intensity relation; a partial mapping is rejected.",
         ),
     )
@@ -238,7 +366,7 @@ class CombustorData(OpsBlockData):
         "energy_intensity",
         ConfigValue(
             default=2.0 * pyunits.kWh / pyunits.m**3,
-            description="Electrical output per unit total inlet volume (a "
+            description="Electrical output per unit total fuel volume (a "
             "fixed, regressable Var once built), kWh/m^3. Used only under "
             "the constant-intensity power relation.",
         ),
@@ -264,17 +392,47 @@ class CombustorData(OpsBlockData):
             "Var once built), K.",
         ),
     )
+    CONFIG.declare(
+        "utility_fuel_source",
+        ConfigValue(
+            default=None,
+            domain=_utility_fuel_source_domain,
+            description="Fuel names pulled from utilities rather than connected "
+            "via inlet ports. Accepts a single name or a list of names; these "
+            "names are independent of ``inlet_names`` and must not overlap with "
+            "it. Each utility fuel gets its own ``utility_flow_{name}`` Var "
+            "(m^3/hr) registered via ``register_fuel_usage`` for costing. "
+            "If None, no utility fuel is used.",
+        ),
+    )
+    CONFIG.declare(
+        "blend_ratio",
+        ConfigValue(
+            default=None,
+            domain=_blend_ratio_domain,
+            description="Optional fixed volume ratio between two fuel sources. "
+            "Accepts a single dict or a list of dicts, each of the form "
+            "{fuel_a: fuel_b, ratio: r}, which enforces "
+            "flow_fuel_a[t] == flow_fuel_b[t] * r. Both fuel names must be "
+            "known inlets or utility fuel sources, and r must be positive. "
+            "The ratio is a fixed, regressable process parameter. Pass a "
+            "list to define multiple independent ratio constraints.",
+        ),
+    )
 
     def build(self) -> None:
         """Validate the config, build ports/balances, then the power relation."""
         super().build()
         self._validate_inlet_names()
+        self._validate_fuel_config()
         self._power_relation = self._resolve_power_relation()
         self.add_stream_ports(
             inlet_ports=self._inlet_port_names(), outlet_ports=("outlet",)
         )
         self._register_stream_states()
+        self._build_fuel_usage()
         self._build_mass_balance()
+        self._build_blend_ratio()
         self._build_outlet_state()
         self._build_power_relation()
 
@@ -289,14 +447,29 @@ class CombustorData(OpsBlockData):
         return self.config.inlet_names[0]
 
     def _validate_inlet_names(self) -> None:
-        """Reject empty, non-string, or duplicate ``inlet_names``.
+        """Validate ``inlet_names``.
 
-        Raises:
-            FlexConfigError: If ``inlet_names`` is empty, contains a
-                non-string or empty-string entry, or contains a duplicate.
+        ``None`` is allowed and means "no inlet ports"; it requires
+        ``utility_fuel_source`` to be set. An explicit empty tuple has the
+        same meaning and requirement.
         """
         names = self.config.inlet_names
-        if not names or not all(isinstance(n, str) and n for n in names):
+
+        if names is None:
+            names = ()
+            self.config._data["inlet_names"].set_value(names)
+
+        if not names:
+            if not self.config.utility_fuel_source:
+                raise FlexConfigError(
+                    "inlet_names is empty and no utility_fuel_source is given; "
+                    "pass utility_fuel_source to run without inlet ports, or "
+                    "pass one or more inlet names.",
+                    field="inlet_names",
+                    value=names,
+                )
+            return
+        if not all(isinstance(n, str) and n for n in names):
             raise FlexConfigError(
                 f"inlet_names must be one or more non-empty strings, got "
                 f"{names!r}.",
@@ -334,34 +507,37 @@ class CombustorData(OpsBlockData):
 
         Raises:
             FlexConfigError: If ``heating_values`` names some but not all
-                inlets (or an inlet not in ``inlet_names``), or if an option
-                the resolved relation ignores was explicitly set.
+                fuel sources (inlets and utility fuel sources), or if an
+                option the resolved relation ignores was explicitly set.
         """
         heating_values = self.config.heating_values or {}
         inlet_names = set(self.config.inlet_names)
+        utility_names = set(self.config.utility_fuel_source or [])
+        all_fuel_names = inlet_names | utility_names
         hv_names = set(heating_values)
         user_set = {v.name() for v in self.config.user_values()}
 
         if not hv_names:
             relation = CombustorPowerRelation.CONSTANT_INTENSITY
-        elif hv_names == inlet_names:
+        elif hv_names == all_fuel_names:
             relation = CombustorPowerRelation.HEATING_VALUE
         else:
-            missing = sorted(inlet_names - hv_names)
-            unknown = sorted(hv_names - inlet_names)
+            missing = sorted(all_fuel_names - hv_names)
+            unknown = sorted(hv_names - all_fuel_names)
             detail = ", ".join(
                 part
                 for part in (
                     f"missing a heating value for {missing}" if missing else "",
-                    f"names unknown inlet(s) {unknown}" if unknown else "",
+                    f"names unknown fuel source(s) {unknown}" if unknown else "",
                 )
                 if part
             )
             raise FlexConfigError(
-                "heating_values must supply a heating value for every inlet "
-                f"in inlet_names or none at all ({detail}); supply one for "
-                "every inlet to select the heating-value relation, or drop "
-                "heating_values entirely to fall back to constant_intensity.",
+                "heating_values must supply a heating value for every fuel "
+                f"source (inlet_names and utility_fuel_source) or none at "
+                f"all ({detail}); supply one for every fuel source to "
+                "select the heating-value relation, or drop heating_values "
+                "entirely to fall back to constant_intensity.",
                 field="heating_values",
                 value=self.config.heating_values,
             )
@@ -371,21 +547,137 @@ class CombustorData(OpsBlockData):
                 raise FlexConfigError(
                     "efficiency has no effect under the constant_intensity "
                     "power relation (selected because heating_values was not "
-                    "given for every inlet); remove efficiency, or supply "
-                    "heating_values for every inlet in inlet_names.",
+                    "given for every fuel source); remove efficiency, or supply "
+                    "heating_values for every fuel source (inlet_names and "
+                    "utility_fuel_source).",
                     field="efficiency",
                     value=self.config.efficiency,
                 )
         elif "energy_intensity" in user_set:
             raise FlexConfigError(
                 "energy_intensity has no effect under the heating_value "
-                "power relation (selected because every inlet has a heating "
-                "value); remove energy_intensity, or drop a heating_values "
-                "entry to fall back to constant_intensity.",
+                "power relation (selected because every fuel source has a "
+                "heating value); remove energy_intensity, or drop a "
+                "heating_values entry to fall back to constant_intensity.",
                 field="energy_intensity",
                 value=self.config.energy_intensity,
             )
         return relation
+
+    # -- fuel usage and blend ratio -------------------------------------------
+
+    def _validate_fuel_config(self) -> None:
+        """Validate utility_fuel_source and blend_ratio."""
+        utility_fuels = self.config.utility_fuel_source
+        blend_ratio = self.config.blend_ratio
+
+        if utility_fuels is not None:
+            if len(set(utility_fuels)) != len(utility_fuels):
+                raise FlexConfigError(
+                    "utility_fuel_source names must be unique, "
+                    f"got {list(utility_fuels)!r}.",
+                    field="utility_fuel_source",
+                    value=self.config.utility_fuel_source,
+                )
+            overlap = set(utility_fuels) & set(self.config.inlet_names)
+            if overlap:
+                raise FlexConfigError(
+                    "utility_fuel_source names must not overlap with "
+                    f"inlet_names; duplicate(s): {sorted(overlap)}.",
+                    field="utility_fuel_source",
+                    value=self.config.utility_fuel_source,
+                )
+
+        if blend_ratio is not None:
+            all_names = set(self.config.inlet_names) | set(utility_fuels or [])
+            for item in blend_ratio:
+                fuel_a = next(k for k in item if k != "ratio")
+                fuel_b = item[fuel_a]
+                if fuel_a not in all_names:
+                    raise FlexConfigError(
+                        f"blend_ratio fuel '{fuel_a}' is not a known inlet "
+                        "or utility fuel source.",
+                        field="blend_ratio",
+                        value=item,
+                    )
+                if fuel_b not in all_names:
+                    raise FlexConfigError(
+                        f"blend_ratio fuel '{fuel_b}' is not a known inlet "
+                        "or utility fuel source.",
+                        field="blend_ratio",
+                        value=item,
+                    )
+
+    def _build_fuel_usage(self) -> None:
+        """Register fuel usage for utility fuel sources.
+
+        Each utility fuel source gets its own time-indexed volumetric flow
+        ``Var`` on the combustor block and is registered via
+        :meth:`register_fuel_usage` for costing.
+        """
+        utility_fuels = self.config.utility_fuel_source
+        if utility_fuels is None:
+            return
+
+        tb = self._find_time_block()
+        for name in utility_fuels:
+            flow_var = pyo.Var(
+                tb.time_index,
+                units=pyunits.m**3 / pyunits.hr,
+                bounds=(0.0, None),
+                doc=f"Volumetric flow of utility fuel '{name}' burned by "
+                f"this combustor (m^3/hr).",
+            )
+            self.add_component(f"utility_flow_{name}", flow_var)
+            self.register_fuel_usage(flow_var, fuel_name=name)
+
+    def _build_blend_ratio(self) -> None:
+        """Optionally enforce fixed volume ratios between fuel sources.
+
+        ``blend_ratio`` may be a single mapping or a list/tuple of mappings,
+        each of the form ``{fuel_a: fuel_b, ratio: r}``. For every mapping
+        a fixed process parameter and a time-indexed equality constraint
+        are built.
+        """
+        blend_ratio = self.config.blend_ratio
+        if blend_ratio is None:
+            return
+
+        tb = self._find_time_block()
+        inlet_names = set(self.config.inlet_names)
+
+        def _flow_var(name):
+            if name in inlet_names:
+                return getattr(self, f"flow_in_{name}")
+            return getattr(self, f"utility_flow_{name}")
+
+        for item in blend_ratio:
+            fuel_a = next(k for k in item if k != "ratio")
+            fuel_b = item[fuel_a]
+            ratio_value = item["ratio"]
+
+            flow_a = _flow_var(fuel_a)
+            flow_b = _flow_var(fuel_b)
+
+            ratio_var = self.declare_process_parameter(
+                f"blend_ratio_{fuel_a}_{fuel_b}",
+                ratio_value,
+                pyunits.dimensionless,
+                f"Volume ratio of {fuel_a} to {fuel_b} in the fuel blend.",
+                bounds=(0.0, None),
+            )
+
+            def _blend_rule(b, t, _a=flow_a, _b=flow_b, _r=ratio_var):
+                return _a[t] == _b[t] * _r
+
+            self.add_component(
+                f"blend_ratio_{fuel_a}_{fuel_b}_constraint",
+                pyo.Constraint(
+                    tb.time_index,
+                    rule=_blend_rule,
+                    doc=f"Blend ratio: {fuel_a} flow == {fuel_b} flow * {ratio_value}.",
+                ),
+            )
 
     # -- ports, mass balance, outlet state -----------------------------------
 
@@ -396,26 +688,28 @@ class CombustorData(OpsBlockData):
         ``SimpleGasFlow`` carries three more always-on state variables, and
         registering the *reference* inlet's -- not every inlet's -- keeps the
         model well-posed: the mixing equalities below already pin every other
-        inlet's intensive state to the reference's.
+        inlet's intensive state to the reference's. When there are no inlets
+        (utility-only mode), no inlet states are registered.
         """
         flow_name = self.config.property_package.get_flow_basis_var_name()
-        ref_state = self.find_component(f"inlet_{self._reference_inlet_name()}_state")
-        for name, var in ref_state.define_state_vars().items():
-            if name == flow_name:
-                continue
-            self.register_io_variable(var, role="input")
+        if self.config.inlet_names:
+            ref_state = self.find_component(
+                f"inlet_{self._reference_inlet_name()}_state"
+            )
+            for name, var in ref_state.define_state_vars().items():
+                if name == flow_name:
+                    continue
+                self.register_io_variable(var, role="input")
         for name, var in self.outlet_state.define_state_vars().items():
             if name == flow_name:
                 continue
             self.register_io_variable(var, role="output")
 
     def _build_mass_balance(self) -> None:
-        """Build per-inlet flow References, the mixing balance, and state ties."""
+        """Build per-inlet flow References, the mixing balance."""
         tb = self._find_time_block()
         phase = self._flow_phase()
-        flow_name = self.config.property_package.get_flow_basis_var_name()
         inlet_names = self.config.inlet_names
-        ref_name = self._reference_inlet_name()
 
         flows = {}
         for name in inlet_names:
@@ -443,45 +737,27 @@ class CombustorData(OpsBlockData):
             "flow — the fuel burned plus the combustion air it entrains.",
         )
         def mixing_mass_balance(b, t):
-            return flow_out[t] == (1 + air_to_fuel_ratio) * sum(
-                flows[name][t] for name in inlet_names
-            )
-
-        other_names = inlet_names[1:]
-        if not other_names:
-            return
-        ref_state = self.find_component(f"inlet_{ref_name}_state")
-        state_vars = [v for v in ref_state.define_state_vars() if v != flow_name]
-        for state_var in state_vars:
-
-            def _equality_rule(b, t, name, _v=state_var, _ref=ref_name):
-                other_state = b.find_component(f"inlet_{name}_state")
-                ref_state_ = b.find_component(f"inlet_{_ref}_state")
-                return getattr(other_state, _v)[t] == getattr(ref_state_, _v)[t]
-
-            self.add_component(
-                f"inlet_state_equality_{state_var}",
-                pyo.Constraint(
-                    tb.time_index,
-                    other_names,
-                    rule=_equality_rule,
-                    doc=f"Mixing node: inlet {state_var} equals the reference "
-                    f"inlet's {state_var}.",
-                ),
+            return flow_out[t] == (1 + air_to_fuel_ratio) * (
+                sum(flows[name][t] for name in inlet_names)
+                + sum(
+                    getattr(b, f"utility_flow_{name}")[t]
+                    for name in b.config.utility_fuel_source or []
+                )
             )
 
     def _build_outlet_state(self) -> None:
         """Pass pressure through from the reference inlet; fix the temperature."""
         tb = self._find_time_block()
         flow_name = self.config.property_package.get_flow_basis_var_name()
-        ref_name = self._reference_inlet_name()
-        ref_port = self.find_component(f"inlet_{ref_name}")
+        if self.config.inlet_names:
+            ref_name = self._reference_inlet_name()
+            ref_port = self.find_component(f"inlet_{ref_name}")
 
-        self.add_pass_through_constraints(
-            ref_port,
-            self.outlet,
-            exclude_vars=[flow_name, "temperature"],
-        )
+            self.add_pass_through_constraints(
+                ref_port,
+                self.outlet,
+                exclude_vars=[flow_name, "temperature"],
+            )
 
         flue_gas_temperature = self.declare_process_parameter(
             "flue_gas_temperature",
@@ -507,7 +783,11 @@ class CombustorData(OpsBlockData):
             power[t].setub(0.0)
 
         inlet_names = self.config.inlet_names
+        utility_names = self.config.utility_fuel_source or ()
         flows = {name: getattr(self, f"flow_in_{name}") for name in inlet_names}
+        utility_flows = {
+            name: getattr(self, f"utility_flow_{name}") for name in utility_names
+        }
 
         self.power_generated = pyo.Var(
             tb.time_index,
@@ -539,6 +819,14 @@ class CombustorData(OpsBlockData):
                     f"Lower heating value of inlet '{name}' per unit volume.",
                     bounds=(0.0, None),
                 )
+            for name in utility_names:
+                heating_values[name] = self.declare_process_parameter(
+                    f"heating_value_{name}",
+                    self.config.heating_values[name],
+                    _HEATING_VALUE_UNITS,
+                    f"Lower heating value of utility fuel '{name}' per unit " "volume.",
+                    bounds=(0.0, None),
+                )
             efficiency = self.declare_process_parameter(
                 "efficiency",
                 self.config.efficiency,
@@ -553,11 +841,13 @@ class CombustorData(OpsBlockData):
                 "flow_in_i); the export magnitude (kW).",
             )
             def power_electrical_relation(b, t):
+                total = 0.0 * pyunits.kWh / pyunits.hr
+                for name in inlet_names:
+                    total += heating_values[name] * flows[name][t]
+                for name in utility_names:
+                    total += heating_values[name] * utility_flows[name][t]
                 return b.power_generated[t] == pyunits.convert(
-                    efficiency
-                    * sum(
-                        heating_values[name] * flows[name][t] for name in inlet_names
-                    ),
+                    efficiency * total,
                     pyunits.kW,
                 )
 
@@ -576,8 +866,13 @@ class CombustorData(OpsBlockData):
                 "the export magnitude (kW).",
             )
             def power_electrical_relation(b, t):
+                total = 0.0 * pyunits.m**3 / pyunits.hr
+                for name in inlet_names:
+                    total += flows[name][t]
+                for name in utility_names:
+                    total += utility_flows[name][t]
                 return b.power_generated[t] == pyunits.convert(
-                    energy_intensity * sum(flows[name][t] for name in inlet_names),
+                    energy_intensity * total,
                     pyunits.kW,
                 )
 
