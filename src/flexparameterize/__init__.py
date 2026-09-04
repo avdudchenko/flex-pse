@@ -16,7 +16,13 @@ provided its columns are mapped to model aliases by a
 
 from flexparameterize.apply import ApplyReport, apply_to_model
 from flexparameterize.emit import emit_model_config
-from flexparameterize.regression import ConstantIntensityRegressor
+from flexparameterize.regression import (
+    ConstantIntensityRegressor,
+    FitResult,
+    LinearRegressor,
+    Regressor,
+    get_regressor,
+)
 from flexparameterize.tags import TagMap, TagReport, model_alias
 from flexparameterize.validate import (
     IOPairStatus,
@@ -27,12 +33,16 @@ from flexparameterize.validate import (
 __all__ = [
     "ApplyReport",
     "ConstantIntensityRegressor",
+    "FitResult",
     "IOPairStatus",
+    "LinearRegressor",
+    "Regressor",
     "SufficiencyReport",
     "TagMap",
     "TagReport",
     "apply_to_model",
     "check_sufficiency",
     "emit_model_config",
+    "get_regressor",
     "model_alias",
 ]

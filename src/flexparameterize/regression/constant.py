@@ -7,6 +7,7 @@ import pandas as pd
 from flexcore import nomenclature as nm
 from flexcore.config.schema import SurrogateSpec, SurrogateType
 from flexcore.exceptions import FlexConfigError, FlexDataError
+from flexparameterize.regression.base import FitResult
 
 COEFFICIENT_NAME = nm.INTENSITY_VARS[nm.PowerKind.ELECTRICAL]
 """str: key the fitted coefficient is stored under in a ``SurrogateSpec``'s
@@ -158,6 +159,28 @@ class ConstantIntensityRegressor:
         self.input_variable = str(flow.name)
         self.output_variable = str(power.name)
         return self
+
+    def to_fit_result(self) -> FitResult:
+        """Return this fit as the shared :class:`~.base.FitResult` shape.
+
+        Returns:
+            The coefficient under :data:`COEFFICIENT_NAME`, alongside the
+            fit's metrics, sample count and data window.
+
+        Raises:
+            FlexDataError: If :meth:`fit` has not been called.
+        """
+        if self.coefficient is None:
+            raise FlexDataError(
+                "ConstantIntensityRegressor has no fit yet; call fit(X, y) "
+                "before to_fit_result()."
+            )
+        return FitResult(
+            coefficients={COEFFICIENT_NAME: self.coefficient},
+            metrics=self.metrics,
+            n_samples=self.n_samples,
+            data_window=self.data_window,
+        )
 
     def to_surrogate_spec(
         self, *, input_units: str = "", output_units: str = ""

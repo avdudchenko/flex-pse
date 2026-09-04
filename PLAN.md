@@ -159,8 +159,9 @@ Dependencies are strict unless marked ∥ (parallelizable with the previous one)
 | [M08](plan/milestones/M08_battery_logic.md) | Battery (DERMS) + customizable unit commitment | 3 | M07 | SOC + external dispatch; status/startup/shutdown/dwell/delays/conditional; model-level degeneracy detection |
 | [M09](plan/milestones/M09_plantblock_api_freeze.md) | Network/Plant + topology bases + surrogates + config build + API freeze | 3 | M08 | `NetworkBlock`/`PlantBlock`; SIDO/DIDO + ReverseOsmosis/Exchanger; `build_model(config)`; `api_freeze.py` runs |
 | [M10](plan/milestones/M10_parameterize_core.md) | FlexParameterize core (2-way) | 3 | M09 | Tag aliasing; sufficiency; constant-EI round-trip; `apply_to_model` fixes params + replaces blocks in place |
-| [M10b](plan/milestones/future/M10b_parameterize_multicomponent.md) | Multi-dimensional surrogates + multi-component properties | 4 | M10 | `register_relation`/`swap_relation` over multi-dimensional targets; multi-component property package; typed structured-coefficient field |
-| [M11](plan/milestones/M11_regressor_protocol.md) | Regressor protocol + linear regression | 2 | M10 | Pluggable regressors; fit provenance in emitted configs |
+| ~~M10b~~ | ~~Multi-dimensional surrogates + multi-component properties~~ — **skipped**, see §4 | — | — | — |
+| [M11](plan/milestones/M11_regressor_protocol.md) | Regressor protocol + linear regression | 1.5 | M10 | Pluggable regressors; fit provenance in emitted configs |
+| [M11b](plan/milestones/M11b_native_nlp_estimation.md) | Native-constraint NLP parameter estimation | 3–4 | M10, M11 (loose) ∥ | `flexparameterize.estimation`: `pyomo.contrib.parmest`-backed fits for a unit's own nonlinear-in-parameter relation (e.g. `Pump`'s hydraulic law) |
 | [M12](plan/milestones/M12_rolling_horizon.md) | FlexSchedule: rolling horizon + solve sequences | 3 | M09 | 7-day windowed solve within 2 % of monolithic |
 | [M13](plan/milestones/M13_setpoints_smoothing.md) | Set-point extraction + smoothing + cost reporting | 1–2 | M12 | Tidy set-point schema; totals-preserving smoothing; reports EECO cost (never the objective) |
 | [M14](plan/milestones/M14_docs_notebooks.md) | Docs completion + example notebooks | 2–3 | M13 | `sphinx-build -W` clean; auto unit-model tables; 3 executed notebooks |
@@ -171,11 +172,14 @@ Dependency sketch:
 
 ```
 M00 ─ M01 ─ M02 ─ M03 ─ M04 ─┐
-  ├─ M05 ────────────────────┼─ M07 ─ M08 ─ M09 ─┬─ M10 ─┬─ M10b
-  └─ M06 ────────────────────┘                   │       └─ M11
+  ├─ M05 ────────────────────┼─ M07 ─ M08 ─ M09 ─┬─ M10 ─── M11 ─── M11b
+  └─ M06 ────────────────────┘                   │
                                                   ├─ M12 ─ M13 ─ M14 ─ M15
                                                   └─ M16 (design wrapper)
 ```
+
+M11b is parallelizable with M12–M16 — it extends `flexparameterize` and does
+not touch `flexschedule`/`flexops.design`.
 
 ---
 
@@ -215,6 +219,12 @@ so. They are recorded here so design choices keep the door open.
 - **Validate/Evaluate** — run detailed ODE/PDE models in parallel with the
   scheduler and flag when optimization outputs leave the feasible envelope.
   Requires an ODE model library that does not exist yet.
+- **M10b: multi-dimensional surrogates + multi-component properties** — skipped
+  by decision, not deferred for a technical reason found later. Its draft work
+  order remains at `plan/milestones/future/M10b_parameterize_multicomponent.md`
+  for reference if this is revisited, but M11 no longer depends on it and was
+  rewritten to not assume any of it (multi-output regression, in particular,
+  is now explicitly out of scope — see M11's own update note).
 - **Repo split** — when a package reaches roughly 20 modules / 10k lines *and* has
   external users of its own, promote it to its own repository. `flexcore.config`'s
   versioned schema (JSON canonical, pydantic authority, exported JSON Schema) is

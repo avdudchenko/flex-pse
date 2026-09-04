@@ -24,7 +24,7 @@ dependencies = [
 # test suite passes against the newer versions.
 
 [project.optional-dependencies]
-parameterize = ["pandas>=2.0"]
+parameterize = ["pandas>=2.0", "scikit-learn>=1.3"]
 # HiGHS ships as a self-contained wheel; IPOPT does not (see
 # .github/actions/setup-ipopt and docs installation notes).
 solvers = ["highspy"]

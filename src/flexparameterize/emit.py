@@ -62,13 +62,14 @@ def _surrogate_and_fit_provenance(fit_result) -> tuple[SurrogateSpec, dict]:
     """
     if isinstance(fit_result, SurrogateSpec):
         return fit_result, {}
+    result = fit_result.to_fit_result()
     window = [
         value.isoformat() if hasattr(value, "isoformat") else value
-        for value in fit_result.data_window
+        for value in result.data_window
     ]
     return fit_result.to_surrogate_spec(), {
-        "n_samples": fit_result.n_samples,
-        **fit_result.metrics,
+        "n_samples": result.n_samples,
+        **result.metrics,
         "data_window": window,
     }
 
