@@ -40,12 +40,11 @@ def test_surrogate_from_spec_rejects_constant_intensity():
     [
         SurrogateType.QUADRATIC,
         SurrogateType.EXPONENTIAL,
-        SurrogateType.ARIMA,
         SurrogateType.NEURAL_NETWORK,
     ],
 )
 def test_surrogate_from_spec_stubs_raise_not_implemented(surrogate_type):
-    """Every reserved type is registered, but not yet implemented."""
+    """Reserved types without a full implementation raise NotImplementedError."""
     spec = SurrogateSpec(surrogate_type=surrogate_type, data={})
     with pytest.raises(NotImplementedError, match="MultilinearSurrogate"):
         surrogate_from_spec(spec)
