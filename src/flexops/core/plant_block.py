@@ -1,4 +1,4 @@
-"""PlantBlock: a collection of unit blocks — one facility (architecture §3.3).
+"""PlantBlock: a collection of unit blocks — one facility.
 
 A thin ``FlowsheetBlockData`` subclass, always ``dynamic=False``, whose time
 domain **is** the ``TimeBlock``'s ordered integer set (never Pyomo.DAE): all
@@ -16,7 +16,8 @@ exists (the frozen api-freeze script even builds costing before the plant), so
 as needed: it creates the aggregation ``Expression`` once and refreshes its body
 from the units present at each call. ``FlexCosting.cost_process()`` calls it for
 every plant on the model, so the common path needs no user call at all. Nothing
-is ever deleted (conventions §9).
+is ever deleted — Pyomo components are always updated in place, never removed
+from a built model.
 
 There is no ``replace_unit``: FlexParameterize mutates units in place —
 ``update_parameters`` for regressed values and the energy-relationship
@@ -40,8 +41,8 @@ def _refresh_expression(block, name: str, index, doc: str, rule) -> None:
 
     The re-entrant half of deferred aggregation: an ``Expression`` built before
     a plant's units existed would sum nothing forever, and flex-pse never
-    deletes a component to rebuild it (conventions §9), so the body is
-    refreshed in place instead.
+    deletes a component to rebuild it, so the body is refreshed in place
+    instead.
 
     Args:
         block: The block to build the Expression on.
@@ -60,7 +61,7 @@ def _refresh_expression(block, name: str, index, doc: str, rule) -> None:
 
 
 class _AggregatingFlowsheet(FlowsheetBlockData):
-    """Shared plant/network construction and power aggregation (§3.3).
+    """Shared plant/network construction and power aggregation.
 
     Both composition levels are the same thin steady-state flowsheet over the
     TimeBlock's set; they differ only in *what* they aggregate over, which
@@ -87,8 +88,9 @@ class _AggregatingFlowsheet(FlowsheetBlockData):
         """Force ``dynamic=False`` and adopt the TimeBlock's set as time domain.
 
         This is IDAES' own hook for settling a flowsheet's time domain, and it
-        runs after the ConfigBlock is populated — the one place where R2 can be
-        enforced (never ``dynamic=True``, never Pyomo.DAE) and the TimeBlock's
+        runs after the ConfigBlock is populated — the one place where the
+        steady-state time convention can be enforced (never ``dynamic=True``,
+        never Pyomo.DAE) and the TimeBlock's
         ordered integer Set installed *by reference*, so ``plant.time`` and
         ``time_block.time_index`` are the same object rather than two sets that
         could drift.

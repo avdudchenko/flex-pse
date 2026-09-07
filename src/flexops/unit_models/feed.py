@@ -1,5 +1,4 @@
-r"""Feed(OpsBlockData): a boundary source with no inlets and N named outlets
-(§3.2, §3.4).
+r"""Feed(OpsBlockData): a boundary source with no inlets and N named outlets.
 
 This models the supply side of the facility. A ``Feed`` represents a stream
 entering the plant from outside: it carries the stream's state (composition,

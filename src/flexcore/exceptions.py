@@ -3,13 +3,11 @@
 Every error raised by flex-pse code subclasses :class:`FlexError`. Callers can
 catch :class:`FlexError` to handle any flex-pse-specific failure, or catch a
 concrete subclass to handle one category. Raised messages must state both what
-was wrong and what the user should do about it (see ``plan/00_conventions.md``
-§3).
+was wrong and what the user should do about it.
 
-There is no compatibility/isolation layer here (``plan/01_architecture.md``
-§2.1): ``idaes.*`` and ``pyomo.*`` are imported
-directly at point of use throughout the codebase, and their own exceptions are
-allowed to propagate unwrapped.
+There is no compatibility/isolation layer here: ``idaes.*`` and ``pyomo.*`` are
+imported directly at point of use throughout the codebase, and their own
+exceptions are allowed to propagate unwrapped.
 """
 
 

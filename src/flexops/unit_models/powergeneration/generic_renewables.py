@@ -1,4 +1,4 @@
-r"""GenericRenewables(OpsBlockData): capacity_factor-driven electrical export (§3.4).
+r"""GenericRenewables(OpsBlockData): capacity_factor-driven electrical export.
 
 Like :class:`~flexops.unit_models.powergeneration.combustor.Combustor` and
 :class:`~flexops.unit_models.storage.battery.BatteryModel`, this unit has no

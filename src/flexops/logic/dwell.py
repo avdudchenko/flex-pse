@@ -1,4 +1,4 @@
-"""Optional UC piece: continuous set-point dwell (M08, §3.5).
+"""Optional UC piece: continuous set-point dwell.
 
 Holds a **continuous** process variable (inlet flow, temperature, or any other
 time-indexed Var) steady for a minimum duration -- unrelated to the binary

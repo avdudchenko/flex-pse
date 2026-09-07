@@ -1,5 +1,12 @@
 # M15 — Hardening + 0.1.0 release
 
+**Note:** M12/M13 (FlexSchedule: rolling horizon + set-point extraction) and
+M16 (`flexops.design`) moved to the 0.2 milestone set (`PLAN.md` §4) before
+this milestone ran, so 0.1.0 ships `flexops`/`flexparameterize` plus an
+unpopulated `flexschedule` scaffold — no rolling-horizon scheduling and no
+multi-period design wrapper. Every mention of them below is historical
+context from when this work order was drafted alongside them.
+
 **Effort:** 2 days · **Depends on:** M14 · **Parallelizable:** no
 
 ## Goal
@@ -7,8 +14,10 @@
 Ship 0.1.0. Single-source the version, run the upstream canary and clear (or pin
 and file) anything red, finalize CHANGELOG and README, turn on gentle coverage
 floors, and prove the packaged artifact works: build → TestPyPI → fresh-venv
-install → both the imperative `examples/api_freeze.py` **and** the config-driven
-`examples/api_freeze_config.json` path run. That dual step is THE release gate
+install → both the imperative frozen-API script **and** its config-driven twin
+run (both now live under `src/flexops/tests/fixtures/api_freeze/`; the gate
+copies them out of the repo checkout and runs them against the *installed*
+package). That dual step is THE release gate
 (the config-driven path exercises the versioned schema — JSON canonical, pydantic
 authority, exported JSON Schema — which is the config-driven-everything promise,
 architecture §2.3 / R3). Also audit repo-split readiness (import DAG + per-package
@@ -18,15 +27,15 @@ test isolation) so the "splittable monorepo" promise is verified, not assumed.
 
 - `PLAN.md` §2 (what we are building — README source material; the api_freeze script), §4 (post-v0 backlog — release notes link here)
 - `plan/01_architecture.md` §2.3 (R3: versioned schema — JSON canonical, pydantic authority, exported JSON Schema; config-driven `build_model` — the second release-gate path)
-- `plan/01_architecture.md` §3.6 (M16 `flexops.design` — decide "what works" vs. "deferred" in the release notes based on whether M16 merged)
+- `plan/01_architecture.md` §3.6 (`flexops.design`, rolling-horizon scheduling, and set-point extraction all list under "deferred to 0.2" in the release notes — M16/M12/M13 did not merge before 0.1.0)
 - `plan/00_conventions.md` §1 (single distribution `flex-pse`; repo layout), §5 (CHANGELOG: Keep a Changelog, "Unreleased" on top), §6 (import discipline — the split-later insurance this milestone audits)
 - `plan/02_testing_and_ci.md` §3 (PR-CI per-subpackage coverage reporting; ci/nightly/docs workflows — there is no upstream-canary workflow, R12), §4 (coverage policy: "M15 turns on gentle floors")
 - `plan/03_documentation.md` §1 (installation page)
 
 ## Files to create or modify
 
-- `pyproject.toml` — version `0.1.0`; verify `[solvers]` extra exists (add if missing: at minimum `highspy`); packaging metadata complete (classifiers, urls, license); ensure package-data ships `config/schemas/` JSON Schema exports and `examples/api_freeze_config.json`
-- `examples/api_freeze_config.json` — the versioned JSON config that `build_model` turns into the same model as `api_freeze.py` (add if not already present from M09); part of the release gate
+- `pyproject.toml` — version `0.1.0`; verify `[solvers]` extra exists (add if missing: at minimum `highspy`); packaging metadata complete (classifiers, urls, license); ensure package-data ships `config/schemas/` JSON Schema exports
+- `src/flexops/tests/fixtures/api_freeze/api_freeze_config.json` — the versioned JSON config that `build_model` turns into the same model as `api_freeze.py` (present since M09); part of the release gate
 - `src/flexcore/__init__.py`, `src/flexops/__init__.py`, `src/flexparameterize/__init__.py`, `src/flexschedule/__init__.py` — `__version__` from shared distribution metadata
 - `src/<pkg>/tests/test_version.py` × 4 — one per package (see Tests)
 - `CHANGELOG.md` — "Unreleased" → `0.1.0` with release date; fresh empty "Unreleased" section on top
@@ -75,15 +84,15 @@ anywhere else; `docs/conf.py` should read it the same way if it needs one.
 - Write **honest** release notes at the top of the 0.1.0 section: what works
   (build a plant — imperative and config-driven via `build_model`, tariff/DR
   costing with EECO post-hoc reported cost, on/off + dwell + bypass logic,
-  two-way parameterize round-trip + in-place apply, rolling-horizon scheduling,
-  set-point extraction), and what is explicitly deferred — link `PLAN.md` §4
-  (parallel-train replication, scenario sweeps, forecaster interface, etc.).
-- **M16 (design-mode multi-period wrapper, `flexops.design`):** if M16 is merged,
-  list it under "what works" (size across N representative months with
-  equality-linked sizing vars). If M16 is **not** merged at release time, list
-  multi-period design under **deferred** (single-period `set_design_mode` still
-  works; the multi-period wrapper follows) and note it in the notes — do not
-  claim it. Users trust honest notes; do not oversell v0.
+  two-way parameterize round-trip + in-place apply), and what is explicitly
+  deferred to 0.2 or later — link `PLAN.md` §4: rolling-horizon scheduling and
+  set-point extraction (M12/M13 — `flexschedule` ships as an unpopulated
+  scaffold in 0.1.0), the design-mode multi-period wrapper `flexops.design`
+  (M16 — single-period `set_design_mode` still works if it exists by 0.1.0;
+  the multi-period wrapper follows), multi-dimensional surrogates/
+  multi-component properties (M10b), plus the further backlog (parallel-train
+  replication, scenario sweeps, forecaster interface, etc.). Users trust honest
+  notes; do not oversell v0.
 - Surface the changelog in docs as a release-notes page (myst include of
   `CHANGELOG.md` is the smallest mechanism — implementer's choice).
 
@@ -105,7 +114,7 @@ Fill from PLAN.md §2, in order: one-paragraph "what it is" (the three tools +
 flexcore, the FlexOps/FlexParameterize/FlexSchedule table condensed to prose or
 a small table); install (`pip install flex-pse[solvers]`, plus the IPOPT note
 `idaes get-extensions`); a ~10-line example distilled from
-`examples/api_freeze.py` (TimeBlock → tank → costing → objective); a link to
+the frozen-API script (TimeBlock → tank → costing → objective); a link to
 the hosted docs; license (Apache 2.0). Keep it under a screen and a half.
 
 ### 6. Packaging + THE release gate (procedural — run exactly this)
@@ -132,16 +141,19 @@ pip install --index-url https://test.pypi.org/simple/ \
 # PyPI; only flex-pse itself comes from TestPyPI.
 python -c "import flexcore, flexops, flexparameterize, flexschedule as fs; \
            print(flexcore.__version__, flexops.__version__)"
-python examples/api_freeze.py                 # imperative path: run top-to-bottom and solve
+# copy the frozen-API fixtures out of the repo checkout into the temp dir first:
+#   cp -r <repo>/src/flexops/tests/fixtures/api_freeze/* .
+python api_freeze.py                          # imperative path: run top-to-bottom and solve
 # config-driven path: build the SAME model from the versioned JSON config and solve
 python -c "import flexops as fo; \
-           m = fo.build_model(fo.load_model_config('examples/api_freeze_config.json')); \
+           m = fo.build_model(fo.load_model_config('api_freeze_config.json')); \
            fo.solve_and_report(m)"   # (invocation is implementer's choice; it must build from JSON and solve)
 deactivate
 ```
 
-Both `examples/api_freeze.py` (imperative) **and**
-`examples/api_freeze_config.json` (the config-driven `build_model` path) must run
+Both `api_freeze.py` (imperative) **and** `api_freeze_config.json` (the
+config-driven `build_model` path) — copied out of
+`src/flexops/tests/fixtures/api_freeze/` — must run
 from the freshly installed wheel — they build the same model two ways and are the
 readable illustration of the config-driven-everything promise (architecture
 §2.3 / R3). The JSON config validates against the exported JSON Schema in
@@ -190,8 +202,8 @@ fix it now; it is exactly the debt the audit exists to catch.
    the *distribution* name `flex-pse`. The four-package `test_version.py` tests
    exist to catch this.
 2. **Missing package data in the wheel.** JSON Schema exports
-   (`flexcore/config/schemas/`), example tariff files and the
-   `examples/api_freeze_config.json` the notebooks/examples need — sdist-only
+   (`flexcore/config/schemas/`) and any example tariff files the library
+   itself loads at runtime — sdist-only
    inclusion (MANIFEST) is not enough; the wheel is what pip installs. The
    fresh-venv gate (both paths) catches it; don't skip either path.
 3. **Running the gate from the repo checkout directory.** `python` resolves
@@ -248,7 +260,7 @@ above is the checklist; paste it, with outputs, into the PR description).
 - [ ] CHANGELOG converted to 0.1.0 with date, honest release notes linking PLAN.md §4; fresh "Unreleased" section on top
 - [ ] PR-CI per-subpackage coverage floors on (actuals − 2 %), values recorded in the PR
 - [ ] `python -m build` + `twine check` pass; artifact uploaded to TestPyPI
-- [ ] THE GATE: fresh venv, `pip install` from TestPyPI with `[solvers]`, and **both** `examples/api_freeze.py` (imperative) **and** the config-driven `examples/api_freeze_config.json` `build_model` path run top-to-bottom and solve
+- [ ] THE GATE: fresh venv, `pip install` from TestPyPI with `[solvers]`, and **both** `api_freeze.py` (imperative) **and** the config-driven `api_freeze_config.json` `build_model` path — copied out of `src/flexops/tests/fixtures/api_freeze/` — run top-to-bottom and solve
 - [ ] README.md filled from PLAN.md §2 (what/install/10-line example/docs link/license)
 - [ ] `git tag v0.1.0` pushed; GitHub release created with notes + artifacts
 - [ ] Repo-split audit: `lint-imports` clean and each package's test suite passes in isolation; all five results recorded in the PR

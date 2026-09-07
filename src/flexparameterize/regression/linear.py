@@ -31,6 +31,9 @@ class LinearRegressor:
         data_window: ``(first, last)`` index value of the rows used.
         input_variables: Column names of the fitted inputs, in order.
         output_variable: Column name of the fitted output.
+        input_units: Units of every fitted input column, keyed by its column
+            name.
+        output_units: Units of the fitted output column.
     """
 
     def __init__(self) -> None:
@@ -40,19 +43,35 @@ class LinearRegressor:
         self.data_window: tuple = ()
         self.input_variables: list[str] = []
         self.output_variable: str = ""
+        self.input_units: dict[str, str] = {}
+        self.output_units: str = ""
 
-    def fit(self, X: pd.DataFrame, y: pd.DataFrame) -> "LinearRegressor":
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        input_units: dict[str, str],
+        output_units: str,
+    ) -> "LinearRegressor":
         """Fit an OLS line of ``y`` against ``X``'s columns.
 
         Args:
             X: One or more input columns.
             y: One output column (a one-column ``DataFrame`` or a ``Series``).
+            input_units: Units of every fitted input column, keyed by its
+                column name (every column in ``X`` must have an entry).
+                Recorded for :meth:`to_surrogate_spec`.
+            output_units: Units of the fitted output column. Recorded for
+                :meth:`to_surrogate_spec`.
 
         Returns:
             ``self``, fitted.
 
         Raises:
-            FlexConfigError: If scikit-learn is not installed.
+            FlexConfigError: If scikit-learn is not installed, or if
+                ``input_units`` is missing an entry for one of ``X``'s
+                columns.
             FlexDataError: If fewer rows survive dropping nulls than
                 ``X.shape[1] + 1`` (the minimum an OLS fit with an intercept
                 needs to be determined).
@@ -64,6 +83,15 @@ class LinearRegressor:
                 "LinearRegressor requires scikit-learn. Install it with "
                 "`pip install 'flex-pse[parameterize]'`."
             ) from exc
+
+        missing = [name for name in X.columns if name not in input_units]
+        if missing:
+            raise FlexConfigError(
+                f"fit is missing input_units for {missing}; every input "
+                f"column ({list(X.columns)}) needs an entry.",
+                field="input_units",
+                value=missing,
+            )
 
         output = _single_column(y, "y")
         paired = pd.concat([X, output.rename("__y__")], axis=1).dropna()
@@ -93,6 +121,8 @@ class LinearRegressor:
         self.data_window = (paired.index.min(), paired.index.max())
         self.input_variables = list(X.columns)
         self.output_variable = str(output.name)
+        self.input_units = dict(input_units)
+        self.output_units = output_units
         return self
 
     def to_fit_result(self) -> FitResult:
@@ -113,15 +143,10 @@ class LinearRegressor:
             data_window=self.data_window,
         )
 
-    def to_surrogate_spec(
-        self, *, input_units: dict[str, str], output_units: str
-    ) -> SurrogateSpec:
+    def to_surrogate_spec(self) -> SurrogateSpec:
         """Return the fit as a ``multilinear`` ``SurrogateSpec``.
 
-        Args:
-            input_units: Units of every fitted input column, keyed by its
-                column name (every fitted column must have an entry).
-            output_units: Units of the fitted output column.
+        Uses the ``input_units``/``output_units`` recorded by :meth:`fit`.
 
         Returns:
             A ``SurrogateType.MULTILINEAR`` spec whose ``data`` is exactly
@@ -131,29 +156,19 @@ class LinearRegressor:
 
         Raises:
             FlexDataError: If :meth:`fit` has not been called.
-            FlexConfigError: If ``input_units`` is missing an entry for a
-                fitted input column.
         """
         if self.coefficients is None:
             raise FlexDataError(
                 "LinearRegressor has no fit yet; call fit(X, y) before "
                 "to_surrogate_spec()."
             )
-        missing = [name for name in self.input_variables if name not in input_units]
-        if missing:
-            raise FlexConfigError(
-                f"to_surrogate_spec is missing input_units for {missing}; every "
-                f"fitted input column ({self.input_variables}) needs an entry.",
-                field="input_units",
-                value=missing,
-            )
         return SurrogateSpec(
             surrogate_type=SurrogateType.MULTILINEAR,
             data={
                 "input_variables": {
-                    name: input_units[name] for name in self.input_variables
+                    name: self.input_units[name] for name in self.input_variables
                 },
-                "output_variables": {self.output_variable: output_units},
+                "output_variables": {self.output_variable: self.output_units},
                 "coefficients": self.coefficients,
             },
         )

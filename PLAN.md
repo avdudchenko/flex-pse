@@ -70,8 +70,9 @@ wraps it — flex-pse does not build its own tariff/cost engine.
 ### Target user-facing API (the "API freeze" script)
 
 This script — adapted from the architecture slides — must run top-to-bottom and
-solve by the end of milestone M09. It is checked in as `examples/api_freeze.py`
-and guarded by a component test; any change that breaks it is a breaking change.
+solve by the end of milestone M09. It is checked in as
+`src/flexops/tests/fixtures/api_freeze/api_freeze.py` and guarded by a component
+test; any change that breaks it is a breaking change.
 
 ```python
 import pyomo.environ as pyo
@@ -159,34 +160,54 @@ Dependencies are strict unless marked ∥ (parallelizable with the previous one)
 | [M08](plan/milestones/M08_battery_logic.md) | Battery (DERMS) + customizable unit commitment | 3 | M07 | SOC + external dispatch; status/startup/shutdown/dwell/delays/conditional; model-level degeneracy detection |
 | [M09](plan/milestones/M09_plantblock_api_freeze.md) | Network/Plant + topology bases + surrogates + config build + API freeze | 3 | M08 | `NetworkBlock`/`PlantBlock`; SIDO/DIDO + ReverseOsmosis/Exchanger; `build_model(config)`; `api_freeze.py` runs |
 | [M10](plan/milestones/M10_parameterize_core.md) | FlexParameterize core (2-way) | 3 | M09 | Tag aliasing; sufficiency; constant-EI round-trip; `apply_to_model` fixes params + replaces blocks in place |
-| ~~M10b~~ | ~~Multi-dimensional surrogates + multi-component properties~~ — **skipped**, see §4 | — | — | — |
+| ~~M10b~~ | ~~Multi-dimensional surrogates + multi-component properties~~ — **deferred to 0.2**, see §4 | — | — | — |
 | [M11](plan/milestones/M11_regressor_protocol.md) | Regressor protocol + linear regression | 1.5 | M10 | Pluggable regressors; fit provenance in emitted configs |
 | [M11b](plan/milestones/M11b_native_nlp_estimation.md) | Native-constraint NLP parameter estimation | 3–4 | M10, M11 (loose) ∥ | `flexparameterize.estimation`: `pyomo.contrib.parmest`-backed fits for a unit's own nonlinear-in-parameter relation (e.g. `Pump`'s hydraulic law) |
-| [M12](plan/milestones/M12_rolling_horizon.md) | FlexSchedule: rolling horizon + solve sequences | 3 | M09 | 7-day windowed solve within 2 % of monolithic |
-| [M13](plan/milestones/M13_setpoints_smoothing.md) | Set-point extraction + smoothing + cost reporting | 1–2 | M12 | Tidy set-point schema; totals-preserving smoothing; reports EECO cost (never the objective) |
-| [M14](plan/milestones/M14_docs_notebooks.md) | Docs completion + example notebooks | 2–3 | M13 | `sphinx-build -W` clean; auto unit-model tables; 3 executed notebooks |
+| ~~M12~~ | ~~FlexSchedule: rolling horizon + solve sequences~~ — **deferred to 0.2**, see §4 | — | — | — |
+| ~~M13~~ | ~~Set-point extraction + smoothing + cost reporting~~ — **deferred to 0.2**, see §4 | — | — | — |
+| [M14](plan/milestones/M14_docs_notebooks.md) | Docs completion + example notebooks | 2–3 | M11b | `sphinx-build -W` clean; auto unit-model tables; 2 executed notebooks |
 | [M15](plan/milestones/M15_release.md) | Hardening + 0.1.0 release | 2 | M14 | TestPyPI install runs the API-freeze example |
-| [M16](plan/milestones/M16_design_multiperiod.md) | Design-mode multi-period wrapper | 3 | M09, M07 | `flexops.design`: merge N representative ≤1-month models; equality-link sizing vars |
+| ~~M16~~ | ~~Design-mode multi-period wrapper~~ — **deferred to 0.2**, see §4 | — | — | — |
 
 Dependency sketch:
 
 ```
 M00 ─ M01 ─ M02 ─ M03 ─ M04 ─┐
-  ├─ M05 ────────────────────┼─ M07 ─ M08 ─ M09 ─┬─ M10 ─── M11 ─── M11b
-  └─ M06 ────────────────────┘                   │
-                                                  ├─ M12 ─ M13 ─ M14 ─ M15
-                                                  └─ M16 (design wrapper)
+  ├─ M05 ────────────────────┼─ M07 ─ M08 ─ M09 ─── M10 ─── M11 ─── M11b ─── M14 ─ M15
+  └─ M06 ────────────────────┘
 ```
 
-M11b is parallelizable with M12–M16 — it extends `flexparameterize` and does
-not touch `flexschedule`/`flexops.design`.
+M10b, M12, M13, and M16 move to the 0.2 milestone set (§4) and are off the
+0.1.0 critical path entirely: M14 now depends directly on M11b, and `flexops`
+ships 0.1.0 without `flexops.design`, `flexschedule` ships as an unpopulated
+package (scaffolded in M00, built out starting M12 in 0.2).
 
 ---
 
-## 4. Post-v0 backlog (explicitly NOT in scope for 0.1.0)
+## 4. Post-0.1.0 backlog
 
-Do not build any of these during M00–M16, even partially, unless a milestone says
-so. They are recorded here so design choices keep the door open.
+Do not build any of these during M00–M15, even partially, unless a milestone
+says so.
+
+### 4.1 Planned for 0.2
+
+These four already have full work orders (drafted alongside the 0.1.0
+milestones, then deferred) and are the first candidates once 0.1.0 ships. Each
+work order carries a `> Deferred to 0.2` banner and may still need revision
+against whatever 0.1.0 actually lands as before it is picked up again.
+
+| # | Title | Effort | Depends on | Headline deliverable |
+|---|---|---|---|---|
+| [M10b](plan/milestones/future/M10b_parameterize_multicomponent.md) | Multi-dimensional surrogates + multi-component properties | 4 | M10 | Multi-output regression; multi-component property packages |
+| [M12](plan/milestones/future/M12_rolling_horizon.md) | FlexSchedule: rolling horizon + solve sequences | 3 | M09 | 7-day windowed solve within 2 % of monolithic |
+| [M13](plan/milestones/future/M13_setpoints_smoothing.md) | Set-point extraction + smoothing + cost reporting | 1–2 | M12 | Tidy set-point schema; totals-preserving smoothing; reports EECO cost (never the objective) |
+| [M16](plan/milestones/future/M16_design_multiperiod.md) | Design-mode multi-period wrapper | 3 | M09, M07 | `flexops.design`: merge N representative ≤1-month models; equality-link sizing vars |
+
+Renumbering these for 0.2 (M20/M21/... or similar) is a decision to make when
+0.2 planning starts, not now — the M-numbers above are kept only so the
+existing work orders and cross-references in M14/M15 stay findable.
+
+### 4.2 Further backlog (no committed milestone)
 
 - **Parallel-train replication + delay-chain templates** — the customizable unit
   commitment in M08 (status/startup/shutdown/dwell/delays/conditional) and its
@@ -204,9 +225,10 @@ so. They are recorded here so design choices keep the door open.
   rigid to reuse; this will be purpose-built.
 - **Case studies** — (1) behind-the-meter battery sizing with third-party
   dispatch injected via the DERMS external-dispatch hook (M08), size as the only
-  free design variable, sized across representative periods with the M16 design
-  wrapper; (2) flexibility baseline-vs-optimal with logic-encoded heuristics
-  ("shut down one parallel train during peak hours") built on the M08 UC layer.
+  free design variable, sized across representative periods with the (0.2) M16
+  design wrapper; (2) flexibility baseline-vs-optimal with logic-encoded
+  heuristics ("shut down one parallel train during peak hours") built on the
+  M08 UC layer.
 - **DR capacity estimation** — production-maximizing solves as a function of event
   duration and preparation time, to inform reliable DR bids.
 - **External forecaster interface** — "forecast, then fix parameters" adapter so

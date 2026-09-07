@@ -291,7 +291,8 @@ and still holds everywhere else in these two files. Say so in a comment where it
 - `CHANGELOG.md` under `## [Unreleased] / ### Added` — one prose paragraph per block in the
   house style, plus the registry/aggregation additions.
 
-`examples/api_freeze.py` and `src/flexops/tests/test_api_freeze.py` are **not touched**;
+The frozen-API fixture (`src/flexops/tests/fixtures/api_freeze/`) and
+`src/flexops/tests/test_api_freeze.py` are **not touched**;
 `test_api_freeze` does not assert `__all__`, so these exports are purely additive.
 
 ---

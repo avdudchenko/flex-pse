@@ -1,8 +1,8 @@
 """flex-pse costing: the thin interface around the external EECO package.
 
 The tariff/operating-cost engine is EECO (``eeco`` on PyPI); this package wraps
-it (``plan/01_architecture.md`` §2.4/§3.6). All ``eeco`` calls are
-collected in :mod:`flexops.costing.opex` (the sole import point).
+it. All ``eeco`` calls are collected in :mod:`flexops.costing.opex` (the sole
+import point).
 """
 
 from flexops.costing.flex_costing import (

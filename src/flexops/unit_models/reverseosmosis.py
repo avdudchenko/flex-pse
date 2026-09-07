@@ -1,4 +1,4 @@
-r"""ReverseOsmosis(SIDOBlock): feed -> permeate + brine (§3.4).
+r"""ReverseOsmosis(SIDOBlock): feed -> permeate + brine.
 
 A direct physical subclass of
 :class:`~flexops.unit_models.base.sido.SIDOBlockData` that renames the split

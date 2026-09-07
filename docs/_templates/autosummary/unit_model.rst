@@ -6,4 +6,4 @@
    :members:
    :show-inheritance:
 
-.. TODO(M14): insert flexops-unit-tables here
+.. flexops-unit-tables:: {{ module }}.{{ objname }}

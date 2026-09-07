@@ -1,5 +1,9 @@
 # M12 — FlexSchedule: rolling horizon + solve sequences
 
+> **Deferred to 0.2.** Not in scope for 0.1.0 — see `PLAN.md` §4. M14/M15 no
+> longer depend on this milestone; the plan below is retained as a draft, not a
+> live spec, and may be revised before 0.2 work begins.
+
 **Effort:** 3 days · **Depends on:** M09 · **Parallelizable:** with M10/M11
 
 ## Goal

@@ -1,12 +1,13 @@
-"""build_model: construct a whole flex-pse model from one config (§2.3, R3).
+"""build_model: construct a whole flex-pse model from one config.
 
 The config-driven entry point. A single validated
 :class:`~flexcore.config.schema.ModelConfig` yields the TimeBlock, the property
 package, the ``FlexCosting`` block, the network/plant/unit tree, its arcs, any
 external dispatch, and the objective — so nothing essential has to live in
-imperative code. ``examples/api_freeze.py`` and
-``examples/api_freeze_config.json`` are the same model built each way, and a
-component test holds them to the same solved objective.
+imperative code. The frozen-API fixtures ``api_freeze.py`` and
+``api_freeze_config.json`` (under ``flexops/tests/fixtures/api_freeze/``) are
+the same model built each way, and a component test holds them to the same
+solved objective.
 
 **Units in a persisted config are data, not code.** A config cannot carry a
 Pyomo expression, so a units-carrying quantity is written as
@@ -81,7 +82,8 @@ def build_model(config) -> pyo.ConcreteModel:
         config: A :class:`~flexcore.config.schema.ModelConfig`, or a path or
             mapping round-tripped through
             :func:`~flexcore.config.io.load_model_config` first (never used
-            raw — conventions §4).
+            raw — anything a user configures must go through the validated
+            schema, not an ad hoc dict).
 
     Returns:
         The constructed ``ConcreteModel``, carrying ``time_block``,

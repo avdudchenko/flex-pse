@@ -10,9 +10,9 @@
 # syntax and the config schema forbids undocumented keys.
 #
 # It runs with the working directory set to where its data fixtures live
-# (examples/data/), since it loads them by bare filename. Its arcs are not
-# expanded here: applying pyo.TransformationFactory("network.expand_arcs") is
-# the caller's explicit step, as is the solve.
+# (the sibling data/ directory), since it loads them by bare filename. Its arcs
+# are not expanded here: applying pyo.TransformationFactory("network.expand_arcs")
+# is the caller's explicit step, as is the solve.
 import pyomo.environ as pyo
 from pyomo.environ import units as pyunits
 from pyomo.network import Arc

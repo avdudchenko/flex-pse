@@ -1,4 +1,4 @@
-"""Shared helper code used by the boundary blocks (architecture §3.4).
+"""Shared helper code used by the boundary blocks.
 
 :class:`~flexops.unit_models.feed.Feed` and
 :class:`~flexops.unit_models.product.Product` both put a limit on a
@@ -19,8 +19,8 @@ say which one is meant using :class:`LimitBasis`. flex-pse never guesses
 this from the units, though it does check that the units match.
 
 The limits are mutable ``Param``\\ s, not ``Var.setlb``/``setub``, for three
-reasons: ``set_value`` is the approved way to update a value in place
-(conventions §9); Params keep working even after
+reasons: ``set_value`` is the approved way to update a value in place;
+Params keep working even after
 :meth:`~flexops.core.ops_block.OpsBlockData.set_external_dispatch` fixes the
 bounded ``Var``; and the ``Constraint`` that references the ``Param`` carries
 a dual, so after solving you can read the shadow price of a resource limit.

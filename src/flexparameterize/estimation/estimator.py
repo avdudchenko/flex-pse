@@ -1,9 +1,11 @@
 """``estimate_parameters``/``commit_estimate`` — the public entry points.
 
-Placeholder — not yet implemented. See
-``plan/milestones/M11b_native_nlp_estimation.md`` (Specification section)
-for the full contract, including why ``estimate_parameters`` is pure and
-``commit_estimate`` is the separate, explicit write-back.
+Not yet implemented. This is the intended shape of native-constraint NLP
+parameter estimation (fitting parameters against a unit's own nonlinear
+constraint, e.g. a pump's hydraulic law, rather than a regression against a
+constant or linear surrogate): ``estimate_parameters`` never mutates the unit
+it fits against, and ``commit_estimate`` is the separate, explicit step that
+writes a result back onto a live model.
 """
 
 import pandas as pd

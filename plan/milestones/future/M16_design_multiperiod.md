@@ -1,5 +1,10 @@
 # M16 — Design-mode multi-period wrapper
 
+> **Deferred to 0.2.** Not in scope for 0.1.0 — see `PLAN.md` §4. M14's docs
+> sweep and M15's release notes no longer treat this milestone as conditional;
+> the plan below is retained as a draft, not a live spec, and may be revised
+> before 0.2 work begins.
+
 **Effort:** 3 days · **Depends on:** M09, M07 · **Parallelizable:** no
 
 ## Goal

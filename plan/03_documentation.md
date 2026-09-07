@@ -35,7 +35,8 @@ docs/
 │   └── unit_model.rst          # custom template (see §3)
 ├── _ext/
 │   └── flexdoc.py              # custom directives (see §2)
-└── examples/                   # myst-nb notebooks, globbed from /examples
+└── examples/                   # populated at build time from the
+                                # flex-pse-examples repo (see §4)
 ```
 
 `conf.py` essentials: `sphinx.ext.autodoc`, `autosummary` (generate on),
@@ -85,7 +86,11 @@ and builds with `-W`" — a mechanical check, because the tables are generated.
 
 ## 4. Notebooks
 
-- Live in `/examples`, authored as myst-nb-compatible notebooks; docs glob them.
+- Authored as myst-nb-compatible notebooks in the companion repo
+  `flex-pse-examples`, **not** in this repository. `docs.yml`/`nightly.yml`
+  check out that repo at a pinned ref into `docs/examples/` before the Sphinx
+  build; `conf.py` globs that populated directory exactly as it would glob a
+  local `/examples` folder (M14 §5).
 - `nb_execution_mode = "cache"` everywhere; **the docs PR build executes the
   notebooks** (jupyter-cache directory cached in CI, so only changed notebooks
   re-run) — a broken notebook blocks the merge like any other test. The
@@ -96,6 +101,9 @@ and builds with `-W`" — a mechanical check, because the tables are generated.
   numeric result (so "execution passed" means something).
 - v0 notebook set (M14): `01_build_a_plant`, `02_parameterize_from_data`,
   `03_rolling_horizon`.
+- Every notebook is public-facing: plain language for a domain expert or
+  undergraduate reader, no internal decision/milestone codes or `§`
+  cross-references (M14 §0).
 
 ## 5. Docstring standard (enforced by review, sampled by ruff pydocstyle rules)
 

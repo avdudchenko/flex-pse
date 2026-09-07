@@ -1,4 +1,4 @@
-"""Physical unit-model library (architecture §3.4).
+"""Physical unit-model library.
 
 ``__all__`` is the unit-model registry ``UnitConfig.unit_model_class`` resolves
 against, so it lists **only** constructible unit models; the enum-typed config
@@ -18,12 +18,14 @@ from flexops.unit_models.reverseosmosis import ReverseOsmosis
 from flexops.unit_models.splitter import Splitter
 from flexops.unit_models.storage.battery import BatteryModel
 from flexops.unit_models.storage.tank import Tank
+from flexops.unit_models.wastewater.digestor import Digestor
 
 __all__ = [
     "BatteryModel",
     "Combustor",
     "ConstantEnergyIntensityModel",
     "DIDOBlock",
+    "Digestor",
     "Exchanger",
     "Feed",
     "GenericRenewables",

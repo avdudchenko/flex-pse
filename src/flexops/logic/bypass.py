@@ -1,4 +1,4 @@
-"""Bypass-stream constraints around a unit (M08, architecture §3.5).
+"""Bypass-stream constraints around a unit.
 
 Smallest useful v0 form (documented choice): a fraction of a flow may bypass
 the unit's energy relation entirely. Rewiring Ports/Arcs for a physical bypass

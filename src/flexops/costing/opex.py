@@ -5,9 +5,9 @@ tiered/fixed charges, and both the optimization-time and post-optimization cost
 computations come from the external **EECO** package (``eeco`` on PyPI). This
 module is the thin flex-pse interface around it — loaders, a CSV→dict tariff
 converter, pandas signal helpers, the in-objective Pyomo bridge, and the
-post-optimization evaluator — and, by convention (``plan/00_conventions.md``
-§6), the **only** file in the codebase that imports
-``eeco``. Localizing the import means one file to fix when EECO's API moves.
+post-optimization evaluator — and, by convention, the **only** file in the
+codebase that imports ``eeco``. Localizing the import means one file to fix
+when EECO's API moves.
 
 **EECO owns the math; this file is glue.** No cost arithmetic lives here — no
 price-lookup loops, no demand-charge epigraphs, no kWh conversion. Every dollar
@@ -15,7 +15,7 @@ figure is produced by ``eeco.costs``; the wrappers only marshal inputs, rename
 outputs to stable flex-pse names, and translate errors into the flex-pse
 exception hierarchy.
 
-**Two ways EECO is used** (architecture §2.4):
+**Two ways EECO is used**:
 
 1. *In-objective* — :func:`add_operating_cost` (the facility umbrella over the
    single-utility :func:`add_electricity_cost` / :func:`add_fuel_cost`) asks EECO
@@ -23,7 +23,7 @@ exception hierarchy.
    This is the tractable proxy the scheduler minimizes, not the reported bill.
 2. *Post-optimization* — :func:`evaluate_cost` / :func:`evaluate_fuel_cost`
    evaluate EECO on a **fixed, realized** aggregate-power numpy array to compute
-   the TRUE (de-relaxed) cost — the user-facing number (§6 reporting rule).
+   the TRUE (de-relaxed) cost — the user-facing reported number.
 
 Because EECO convex-relaxes a non-convex pricing structure (notably the tiered
 energy surcharge, which the relaxation drops when no consumption estimate is
@@ -43,7 +43,7 @@ windows are keyed on ``datetime.hour``/``weekday``/``month`` with no tz
 conversion). flex-pse v0 is consistently naive-local (matching ``TimeBlock``);
 tz-aware indices are rejected at the wrapper boundary with :class:`FlexDataError`.
 
-**Demand response.** v0 is **containers-only** (architecture §2.4): :class:`DRConfig`
+**Demand response.** v0 is **containers-only**: :class:`DRConfig`
 holds a loaded DR program, and the internal :func:`_build_dr` hook is a no-op.
 Supplying a DR file never changes the objective. EECO 0.4.0 exposes no DR API,
 so the DR file format is a flex-pse placeholder loaded into the container only.
@@ -60,7 +60,7 @@ import numpy as np
 import pandas as pd
 import pyomo.environ as pyo
 
-# THE sole eeco import point in the whole codebase (§6). The import is soft:
+# THE sole eeco import point in the whole codebase. The import is soft:
 # EECO is only needed to price a *tariff*. A model whose every carrier carries a
 # flat price (FlexCosting's ``energy_prices``) builds, solves, and reports without
 # it, so ``import flexops`` must not hard-require it. Every function that reaches
@@ -761,7 +761,7 @@ class DRConfig:
     """A container/config slot for a demand-response program (v0 no-op).
 
     Holds the loaded DR program object (or ``None``) so the wiring exists;
-    building actual DR constraints is post-v0 (architecture §2.4, PLAN §4).
+    building actual DR constraints is planned future work, not yet built.
 
     Attributes:
         program: The loaded DR program object, or ``None``.
@@ -918,7 +918,7 @@ def _add_utility_cost(
 
 
 def _assert_linear_demand(demand_charge) -> None:
-    """Fail loud if EECO emitted a nonlinear demand term (architecture §3.6).
+    """Fail loud if EECO emitted a nonlinear demand term.
 
     The demand charge must stay an epigraph (linear), not a ``max()``: a
     nonlinear objective silently breaks the LP/relaxable character the scheduler
@@ -1157,7 +1157,7 @@ def add_operating_cost(
 
 
 # --------------------------------------------------------------------------- #
-# Post-optimization evaluator (the reported bill; §2.4)
+# Post-optimization evaluator (the reported bill)
 # --------------------------------------------------------------------------- #
 def _evaluation_index(
     n: int, dt_hours: float, time_index: "pd.DatetimeIndex | None"
@@ -1283,7 +1283,7 @@ def evaluate_cost(
 ) -> float:
     """Compute the TRUE (de-relaxed) electricity cost on a fixed realized load.
 
-    This is the user-facing bill (§6 reporting rule): once the dispatch is
+    This is the user-facing bill: once the dispatch is
     fixed the pricing non-convexity is harmless, so it is an exact post-hoc EECO
     evaluation, not a relaxation. All ``eeco.*`` calls route through this module
     (the sole import point).

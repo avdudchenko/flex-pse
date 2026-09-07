@@ -1,4 +1,4 @@
-"""OpsBlock: the base class of every flex-pse unit model (§3.2).
+"""OpsBlock: the base class of every flex-pse unit model.
 
 ``OpsBlockData`` inherits IDAES ``UnitModelBlockData`` for its ConfigBlock, Port,
 and costing-registration machinery, but uses **no ControlVolumes**:
@@ -69,7 +69,7 @@ def _unit_config_domain(value):
     raise FlexConfigError(
         "flexops_config must be a validated flexcore.config.schema.UnitConfig "
         f"instance (or None), not {type(value).__name__}; never pass a raw "
-        "dict (conventions §4).",
+        "dict.",
         field="flexops_config",
         value=value,
     )
@@ -155,7 +155,7 @@ class OpsBlockData(UnitModelBlockData):
             default=None,
             domain=_unit_config_domain,
             description="Optional already-validated UnitConfig for this unit "
-            "(never a raw dict, conventions §4).",
+            "(never a raw dict).",
         ),
     )
     CONFIG.declare(
@@ -454,8 +454,8 @@ class OpsBlockData(UnitModelBlockData):
         The parameter twin of :meth:`declare_power`, and the one way flex-pse
         declares a design or fitted coefficient: a **scalar Var fixed at its
         configured value** rather than a ``Param``, so a design mode or a
-        regression can unfix it in place without any component being replaced
-        (conventions §9). Because it is registered, the value is reachable
+        regression can unfix it in place without any component being replaced.
+        Because it is registered, the value is reachable
         afterwards through :meth:`update_parameters`.
 
         Args:
@@ -565,7 +565,7 @@ class OpsBlockData(UnitModelBlockData):
             BoundaryRecord(var=var, name=var.local_name, resource=resource, kind=kind)
         )
 
-    # -- stream state blocks + ports (property package, §3.7) --------------
+    # -- stream state blocks + ports (property package) --------------------
 
     def add_stream_ports(
         self,
@@ -885,7 +885,7 @@ class OpsBlockData(UnitModelBlockData):
     def swap_relation(self, relation_name: str, surrogate: Surrogate) -> None:
         """Replace a registered relationship in place, from a surrogate.
 
-        Deactivates the named relation (never deletes it — conventions §9),
+        Deactivates the named relation (never deletes it),
         deactivates whatever an earlier swap's builder attached, and adds
         ``{relation_name}_fitted`` built from ``surrogate``, reusing the unit's
         existing registered variables so ports and arcs are untouched. One
@@ -983,7 +983,7 @@ class OpsBlockData(UnitModelBlockData):
         record.fitted = self.find_component(fitted_name)
         assert record.fitted is not None, "Fitted constraint was not added to the unit."
 
-    # -- in-place parameter updates (FlexParameterize 2-way, §5) -----------
+    # -- in-place parameter updates (FlexParameterize 2-way) ----------------
 
     def update_parameters(self, values: dict) -> None:
         """Update registered process parameters in place, by name.
@@ -1015,7 +1015,7 @@ class OpsBlockData(UnitModelBlockData):
                 )
             registered[name].set_value(value)
 
-    # -- external dispatch (DERMS, §3.2) ----------------------------------
+    # -- external dispatch (DERMS) -----------------------------------------
 
     def _resolve_dispatch_series(self, series, tb) -> dict[int, float]:
         """Map a dispatch series to ``{time_index: value}``.
@@ -1062,7 +1062,7 @@ class OpsBlockData(UnitModelBlockData):
 
         For each time point ``t``, sets ``var[t]`` to ``series[t]`` and, when
         ``fix`` is True, fixes it — removing the dispatch degree of freedom while
-        leaving sizing free (the DERMS/aggregator case, §3.2). Available on all
+        leaving sizing free (the DERMS/aggregator case). Available on all
         units; first-classed on ``BatteryModel``.
 
         Args:
@@ -1107,7 +1107,7 @@ class OpsBlockData(UnitModelBlockData):
         The per-unit primitive behind
         :func:`~flexops.core.build.build_model`. A path or mapping is
         round-tripped through the pydantic schema first, so a raw dict is never
-        passed onward (conventions §4) and an invalid one raises
+        passed onward and an invalid one raises
         ``pydantic.ValidationError`` naming the offending field path (the error
         is deliberately **not** wrapped — the field path is the contract).
 

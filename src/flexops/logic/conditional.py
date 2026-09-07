@@ -1,4 +1,4 @@
-"""Optional UC piece: conditional status implications between two units (M08, §3.5).
+"""Optional UC piece: conditional status implications between two units.
 
 Linear implications on two units' status Binaries: "if x is on then y is on"
 or "if x is on then y is off".

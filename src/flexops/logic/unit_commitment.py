@@ -1,4 +1,4 @@
-"""Optional UC piece: transition + minimum uptime/downtime logic (M08, §3.5).
+"""Optional UC piece: transition + minimum uptime/downtime logic.
 
 Ties a ``startup[t]``/``shutdown[t]`` binary pair to the rising/falling edges of
 a unit's ``status[t]`` binary, and (optionally) enforces a minimum number of

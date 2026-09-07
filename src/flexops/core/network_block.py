@@ -1,4 +1,4 @@
-"""NetworkBlock: a composition of plant blocks (architecture §3.3, R7).
+"""NetworkBlock: a composition of plant blocks.
 
 A portfolio / campus / multi-facility system. Same thin ``dynamic=False``
 flowsheet over the ``TimeBlock``'s set as
@@ -90,7 +90,7 @@ class NetworkBlockData(_AggregatingFlowsheet):
         """Sum a time-indexed quantity across a chosen subset of this network's plants.
 
         Unlike the network's own totals (always every plant, to avoid
-        double-counting per architecture §3.3/R7), this aggregates whatever
+        double-counting), this aggregates whatever
         plants the caller names — e.g. one building's power draw within a
         larger campus. A plant missing ``var_name`` is skipped with a logged
         warning; the aggregate is built from whichever plants have it.
@@ -103,7 +103,7 @@ class NetworkBlockData(_AggregatingFlowsheet):
                 ``f"aggregate_{var_name}"``.
             replace: If an aggregate named ``name`` already exists, update its
                 defining Constraint in place to the new ``plants``/``var_name``
-                (never deleting the Var or Constraint, conventions §9). If
+                (never deleting the Var or Constraint). If
                 ``False``, leave the existing aggregate untouched and log a
                 warning instead.
         """
@@ -251,7 +251,7 @@ class NetworkBlockData(_AggregatingFlowsheet):
         only between like-quality streams (the linear reading; a flow-weighted
         blend would make every mixing point bilinear). Plants that register a
         product without a quality are unconstrained. Built once — the
-        Constraint is never rebuilt or deleted (conventions §9).
+        Constraint is never rebuilt or deleted.
         """
         if self.component(EQ_PRODUCT_QUALITY) is not None:
             return

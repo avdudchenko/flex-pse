@@ -1,8 +1,7 @@
 """``UnitExperiment`` — the ``pyomo.contrib.parmest`` experiment wiring.
 
-Placeholder — not yet implemented. See
-``plan/milestones/M11b_native_nlp_estimation.md`` (Specification section,
-"UnitExperiment") for the full wiring contract.
+Not yet implemented. This is the intended shape wrapping a built unit as one
+``parmest`` ``Experiment`` over its whole horizon.
 """
 
 import pandas as pd

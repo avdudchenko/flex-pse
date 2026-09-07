@@ -1,4 +1,4 @@
-"""FlexCosting: the costing block that wraps EECO (architecture §3.6).
+"""FlexCosting: the costing block that wraps EECO.
 
 ``FlexCosting`` subclasses IDAES :class:`FlowsheetCostingBlockData` for its
 registration/CapEx machinery and organizes every cost into two sub-blocks it
@@ -676,7 +676,7 @@ class FlexCostingData(FlowsheetCostingBlockData):
     # -- DR hook (no-op in v0; containers-only) ---------------------------
 
     def _build_dr(self) -> None:
-        """No-op demand-response hook (v0 is containers-only, architecture §2.4).
+        """No-op demand-response hook (v0 is containers-only).
 
         Exists so later DR work is additive; it builds no DR event, curtailment,
         incentive, or capacity constraints.
@@ -1344,7 +1344,7 @@ class FlexCostingData(FlowsheetCostingBlockData):
             if entry.capex_constraint is not None:
                 entry.capex_constraint.activate()
 
-    # -- reported cost (post-solve; never the objective, §6) --------
+    # -- reported cost (post-solve; never the objective) ------------
 
     def _natively_priced_cost(
         self,
@@ -1386,7 +1386,7 @@ class FlexCostingData(FlowsheetCostingBlockData):
     def report_cost(self, model, *, prev_demand_dict=None) -> CostReport:
         """Return the reported, categorized cost, evaluated **post-solve**.
 
-        The user-facing cost (§6 reporting rule; M13 surfaces it). Operating
+        The user-facing reported cost. Operating
         electricity/fuel are EECO **post-hoc** evaluations on the realized
         dispatch; fixed is the config constant; scalar costs are recomputed
         natively; DR revenue is ``0`` in v0 (containers-only); capital is read off
@@ -1396,7 +1396,8 @@ class FlexCostingData(FlowsheetCostingBlockData):
         Args:
             model: The solved model (accepted for the documented API; the costing
                 block reads its own components).
-            prev_demand_dict: Optional prior-demand carry (M12 rolling horizon) so
+            prev_demand_dict: Optional prior-demand carry, for a future
+                rolling-horizon workflow that is not yet built, so
                 EECO bills only the demand incremental above the running peak,
                 rather than recounting the peak in every window. ``None`` (default)
                 bills the horizon standalone.

@@ -1,4 +1,4 @@
-"""Predefined surrogate-structure classes (architecture §3.4/§5).
+"""Predefined surrogate-structure classes.
 
 Every relationship a unit's energy draw (or any other registered relation,
 see :meth:`~flexops.core.ops_block.OpsBlockData.register_relation`) can be

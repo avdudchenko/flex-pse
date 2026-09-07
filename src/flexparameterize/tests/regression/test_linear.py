@@ -30,7 +30,9 @@ def test_recovers_coefficients_noisy_pump():
     X = pd.DataFrame({"flow": flow})
     y = pd.DataFrame({"power": power})
 
-    regressor = LinearRegressor().fit(X, y)
+    regressor = LinearRegressor().fit(
+        X, y, input_units={"flow": "m^3/hr"}, output_units="kW"
+    )
 
     assert regressor.coefficients["flow"] == pytest.approx(0.4, rel=1e-2)
     assert regressor.coefficients["intercept"] == pytest.approx(2.0, abs=0.05)
@@ -47,13 +49,15 @@ def test_two_input_columns():
     X = pd.DataFrame({"flow": flow, "pressure": pressure})
     y = pd.DataFrame({"power": power})
 
-    regressor = LinearRegressor().fit(X, y)
+    regressor = LinearRegressor().fit(
+        X, y, input_units={"flow": "m^3/hr", "pressure": "Pa"}, output_units="kW"
+    )
 
     assert regressor.coefficients["flow"] == pytest.approx(0.4, rel=1e-2)
     assert regressor.coefficients["pressure"] == pytest.approx(1e-5, rel=1e-2)
 
     with pytest.raises(FlexConfigError, match="pressure"):
-        regressor.to_surrogate_spec(input_units={"flow": "m^3/hr"}, output_units="kW")
+        LinearRegressor().fit(X, y, input_units={"flow": "m^3/hr"}, output_units="kW")
 
 
 @pytest.mark.unit
@@ -63,7 +67,9 @@ def test_isinstance_regressor():
     assert isinstance(LinearRegressor(), Regressor)
     X = pd.DataFrame({"flow": [1.0, 2.0, 3.0, 4.0]})
     y = pd.DataFrame({"power": [2.4, 2.8, 3.2, 3.6]})
-    regressor = LinearRegressor().fit(X, y)
+    regressor = LinearRegressor().fit(
+        X, y, input_units={"flow": "m^3/hr"}, output_units="kW"
+    )
     result = regressor.to_fit_result()
     assert result.coefficients["flow"] == pytest.approx(0.4, rel=1e-6)
 
@@ -76,15 +82,15 @@ def test_provenance_populated():
     pytest.importorskip("sklearn")
     X = pd.DataFrame({"flow": [1.0, 2.0, 3.0, 4.0]})
     y = pd.DataFrame({"power": [2.4, 2.8, 3.2, 3.6]})
-    regressor = LinearRegressor().fit(X, y)
+    regressor = LinearRegressor().fit(
+        X, y, input_units={"flow": "m^3/hr"}, output_units="kW"
+    )
 
     result = regressor.to_fit_result()
     assert np.isfinite(result.metrics["r2"])
     assert np.isfinite(result.metrics["rmse"])
 
-    spec = regressor.to_surrogate_spec(
-        input_units={"flow": "m^3/hr"}, output_units="kW"
-    )
+    spec = regressor.to_surrogate_spec()
     assert spec.surrogate_type == SurrogateType.MULTILINEAR
     provenance = {"n_samples": result.n_samples, **result.metrics}
     json.dumps(provenance)
@@ -99,4 +105,4 @@ def test_sklearn_absent_raises(monkeypatch):
     X = pd.DataFrame({"flow": [1.0, 2.0, 3.0]})
     y = pd.DataFrame({"power": [1.0, 2.0, 3.0]})
     with pytest.raises(FlexConfigError, match=r"flex-pse\[parameterize\]"):
-        LinearRegressor().fit(X, y)
+        LinearRegressor().fit(X, y, input_units={"flow": "m^3/hr"}, output_units="kW")

@@ -21,9 +21,9 @@ class TankData(SISOBlockData):
     :class:`~flexops.unit_models.base.siso.SISOBlockData` but *replaces* the
     SISO pass-through mass balance with a holdup difference equation (a
     pump's inlet equals its outlet; a tank stores the difference). Per the
-    project's backward-differencing convention for rate/difference equations
-    (``plan/00_conventions.md`` §2), the volume *ending* period ``t`` is
-    written in terms of the flows sampled *at* ``t``:
+    project's backward-differencing convention for rate/difference equations,
+    the volume *ending* period ``t`` is written in terms of the flows sampled
+    *at* ``t``:
 
     .. math::
 
@@ -50,7 +50,7 @@ class TankData(SISOBlockData):
     way down nor overfills. Because ``capacity`` is itself a ``Var``, the
     defining equation ``volume[t] == level[t] * capacity`` is a product of
     two variables: linear (and LP) when ``capacity`` is fixed (operations
-    mode), but bilinear (NLP) when ``capacity`` is free (design mode / M16
+    mode), but bilinear (NLP) when ``capacity`` is free (design mode /
     multi-period sizing) -- a deliberate, documented tradeoff. Design-mode
     solves of a model containing a tank therefore need IPOPT or an explicit
     ``flexschedule.SolveSequence``, not HiGHS.
@@ -170,7 +170,7 @@ class TankData(SISOBlockData):
             doc="Defines level as volume relative to the chosen capacity: "
             "volume[t] == level[t] * capacity. Linear (LP) when capacity is "
             "fixed (operations mode); bilinear (NLP) when capacity is free "
-            "(design mode / M16 sizing) -- a deliberate tradeoff.",
+            "(design mode / multi-period sizing) -- a deliberate tradeoff.",
         )
         def level_definition(b, t):
             return b.volume[t] == b.level[t] * b.capacity

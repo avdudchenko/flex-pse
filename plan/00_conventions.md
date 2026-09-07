@@ -43,8 +43,11 @@ flex-pse/
 │   └── flexschedule/
 │       ├── horizon.py, sequences.py, setpoints.py, smoothing.py
 │       └── tests/
-├── examples/                       # myst-nb notebooks + api_freeze.py
 └── docs/                           # sphinx (see plan/03_documentation.md)
+                                    # example notebooks live in the companion
+                                    # repo flex-pse-examples; the frozen-API
+                                    # script is a test fixture under
+                                    # src/flexops/tests/fixtures/api_freeze/
 ```
 
 Tests are **colocated** with their package (`src/<pkg>/tests/`), mirroring the
@@ -182,8 +185,12 @@ wrapper), but this is not enforced.
 - Every public unit model has a reference page using the
   `.. flexops-unit-tables::` directive (auto-generates Variables / Constraints /
   Degrees-of-Freedom tables from the built model).
-- How-to content goes in executable myst-nb notebooks under `examples/`;
+- How-to content goes in executable myst-nb notebooks in the companion repo
+  `flex-pse-examples`, which the docs build checks out at a pinned ref;
   narrative design rationale goes in `docs/explanation/`.
+- Public docs (everything under `docs/` and every notebook) never cite
+  milestone codes, decision codes, or plan `§` sections — readers have no
+  access to `plan/`. Explain the reasoning in plain language instead.
 
 ## 9. Agent-specific rules
 

@@ -1,7 +1,7 @@
 """Apply a fit to a live model — the mutate-in-place direction.
 
-The FlexParameterize -> FlexOps half of the two-way coupling (architecture §1,
-§5): given a **built** FlexOps model, tabular data and a
+The FlexParameterize -> FlexOps half of the two-way coupling: given a
+**built** FlexOps model, tabular data and a
 :class:`~flexparameterize.tags.TagMap`, :func:`apply_to_model` fits each unit's
 registered parameters and writes the result straight into the model. No config
 file is produced; its twin :func:`~flexparameterize.emit.emit_model_config`
@@ -9,7 +9,7 @@ covers that direction, and both consume the same ``SurrogateSpec``, so they
 cannot disagree about what was fitted.
 
 Two things happen per unit, and both are in-place — flex-pse never deletes a
-built component (conventions §9):
+built component:
 
 * a ``constant_intensity`` relationship fixes the unit's registered intensity
   parameter at the fitted value, dropping the model's degrees of freedom;

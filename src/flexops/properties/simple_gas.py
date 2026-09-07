@@ -1,4 +1,4 @@
-"""SimpleGasFlow: the minimal gas-stream property package (§3.7).
+"""SimpleGasFlow: the minimal gas-stream property package.
 
 The gas-phase counterpart of
 :mod:`flexops.properties.simple_aqueous`. Where the aqueous package's pressure

@@ -51,8 +51,8 @@ def _fit_linear_spec(unit):
 
     X = pd.DataFrame({"flow_out": flows, "outlet_state.pressure": pressures})
     y = pd.DataFrame({"power_electrical": powers})
-    regressor = LinearRegressor().fit(X, y)
-    spec = regressor.to_surrogate_spec(input_units=INPUT_UNITS, output_units="kW")
+    regressor = LinearRegressor().fit(X, y, input_units=INPUT_UNITS, output_units="kW")
+    spec = regressor.to_surrogate_spec()
     return regressor, spec
 
 

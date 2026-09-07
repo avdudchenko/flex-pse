@@ -1,5 +1,11 @@
 # M09 — Network/Plant + topology bases + surrogates + config build + API freeze
 
+**Note (historical paths):** the frozen-API files this milestone created as
+`examples/api_freeze.py`, `examples/api_freeze_config.json`, and `examples/data/`
+later moved to `src/flexops/tests/fixtures/api_freeze/` when `examples/` was
+removed (notebooks now live in the `flex-pse-examples` repo). Paths below are
+as-written at the time.
+
 **Effort:** 2–3 days · **Depends on:** M08 · **Parallelizable:** no
 
 ## Goal

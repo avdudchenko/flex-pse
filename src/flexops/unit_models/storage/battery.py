@@ -1,9 +1,9 @@
-r"""BatteryModel: SOC dynamics + first-class DERMS dispatch (M08, §3.4/§3.6, R4/R9).
+r"""BatteryModel: SOC dynamics + first-class DERMS dispatch.
 
 No fluid ports (no ``property_package`` needed): a battery is an energy-only
 unit with two dispatch-input actuators, ``power_charge[t]``/
 ``power_discharge[t]`` (kW), and a state of charge tracked in absolute energy
-terms, ``charge[t]`` (kWh). ``capacity`` is the fixable sizing ``Var`` (R4):
+terms, ``charge[t]`` (kWh). ``capacity`` is the fixable sizing ``Var``:
 fixed at the constructor value by default (operations mode); a
 ``costing_package=`` associates it with :meth:`FlexCostingData.set_design_mode`/
 :meth:`~flexops.costing.flex_costing.FlexCostingData.set_operations_mode`.
@@ -28,7 +28,7 @@ fixed at the constructor value by default (operations mode); a
   equality per timestep is not a significant modeling burden.
 * ``charge_balance`` covers **every** ``t``, including ``t=0`` (referencing
   ``charge_init`` in place of ``charge[t-1]`` at the boundary), rather than
-  the spec's separate ``t=1..N-1`` difference equation plus an unrelated
+  a separate ``t=1..N-1`` difference equation plus an unrelated
   ``charge[0] == charge_init``/``soc[0] == soc_init`` initial condition.
   Leaving ``t=0`` governed only by a hard pin on ``charge[0]`` -- as
   ``Tank.initial_volume_eq`` does -- would leave
@@ -39,8 +39,8 @@ fixed at the constructor value by default (operations mode); a
   and drops the need for a separate, differently-named initial-condition
   constraint.
 * ``soh`` (state of health) and ``soh_capacity_limit`` are **not** part of the
-  M08 spec; added at explicit user request as a v0 placeholder ahead of any
-  future degradation-modeling milestone. ``soh`` is fixed at the constructor
+  base battery spec; added at explicit user request as a v0 placeholder ahead of any
+  future degradation-modeling work. ``soh`` is fixed at the constructor
   value (default 0.85, mid-life) like ``capacity``.
 * ``eta_charge``/``eta_discharge`` are fixed **Vars** (registered
   ``regressable=True``), not plain floats read from config -- also added at
@@ -49,7 +49,7 @@ fixed at the constructor value by default (operations mode); a
   fits all three from SCADA data: ``power_charge``/``power_discharge`` in,
   ``charge`` (the SOC state, registered as the process output) out, ``capacity``
   known.
-* ``charge_leakage_rate`` (self-discharge) is **not** part of the M08 spec;
+* ``charge_leakage_rate`` (self-discharge) is **not** part of the base battery spec;
   added at explicit user request as a v0 self-discharge proxy. Like
   ``eta_charge``/``eta_discharge``/``soh``, it is a fixed **Var** (fraction of
   stored charge lost per day, default ``0.0005`` i.e. 0.05%/day) registered
@@ -76,8 +76,7 @@ Usage::
 Config: see ``capacity``, ``power_charge_max``/``power_discharge_max``,
 ``eta_charge``/``eta_discharge``, ``soc_min``/``soc_max``, ``initial_soc``, ``soh``,
 ``charge_leakage_rate`` below, plus the inherited
-``relaxation``/``unit_commitment``/``external_dispatch``/``costing_package``
-(architecture §3.2).
+``relaxation``/``unit_commitment``/``external_dispatch``/``costing_package``.
 
 **Behind-the-meter assumption (v0).** ``power_electrical[t]`` may go negative
 (discharge exports power); any facility-level "net draw >= 0" constraint
@@ -247,7 +246,7 @@ class BatteryModelData(OpsBlockData):
             initialize=capacity_val,
             bounds=(0.0, None),
             units=pyunits.kWh,
-            doc="Chosen battery energy capacity (design Var, R4); fixed at "
+            doc="Chosen battery energy capacity (design Var); fixed at "
             "the constructor value by default (operations mode); "
             "costing.set_design_mode() unfixes it.",
         )
@@ -365,7 +364,7 @@ class BatteryModelData(OpsBlockData):
 
         @self.Constraint(
             tb.time_index,
-            doc="Charge holdup (backward difference, conventions §2): "
+            doc="Charge holdup (backward difference): "
             "charge[t] == charge[t-1]*(1 - charge_leakage_rate*dt) + "
             "dt*(eta_charge*power_charge[t] - "
             "power_discharge[t]/eta_discharge); t=0 references charge_init in "
@@ -442,14 +441,14 @@ class BatteryModelData(OpsBlockData):
         self.register_io_variable(self.charge, role="output")
 
     def set_dispatch(self, series) -> None:
-        """Fix net battery dispatch from an external (DERMS) command series (R9).
+        """Fix net battery dispatch from an external (DERMS) command series.
 
         Splits ``series[t]`` (signed net kW, positive = charging, negative =
         discharging) into the ``power_charge``/``power_discharge`` actuators
         and fixes both via
         :meth:`~flexops.core.ops_block.OpsBlockData.set_external_dispatch`,
         removing the dispatch degree of freedom while leaving ``capacity``
-        free (Pitfall 9). Fixing only the net ``power_electrical`` would
+        free. Fixing only the net ``power_electrical`` would
         leave the charge/discharge split underdetermined -- their
         efficiencies differ, so the split affects the SOC trajectory -- so
         both actuators are pinned directly instead.

@@ -1,7 +1,6 @@
-"""Native-constraint NLP parameter estimation (M11b).
+"""Native-constraint NLP parameter estimation.
 
-Placeholder package — not yet implemented. See
-``plan/milestones/M11b_native_nlp_estimation.md`` for the full specification.
+Not yet implemented; this package is a reserved API surface.
 
 Unlike :mod:`flexparameterize.regression` (the ``Regressor`` Protocol, which
 fits bare ``pandas`` data columns decoupled from any live Pyomo model), this

@@ -6,7 +6,7 @@ identity become a :class:`~flexcore.config.schema.ModelConfig` that
 ``flexops.build_model`` rebuilds the parameterized model from. Its twin,
 :func:`~flexparameterize.apply.apply_to_model`, writes the same fit straight
 into a live model; the two agree by construction, because both consume the same
-``SurrogateSpec`` (architecture §5).
+``SurrogateSpec``.
 
 Serialization is not reimplemented here — callers persist the result with
 :func:`flexcore.config.io.dump_model_config`.

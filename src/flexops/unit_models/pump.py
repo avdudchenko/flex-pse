@@ -1,4 +1,4 @@
-"""Pump(SISOBlock): electrical pump with two selectable power laws (architecture §3.4).
+"""Pump(SISOBlock): electrical pump with two selectable power laws.
 
 Inherits its inlet/outlet ports and pass-through mass balance from
 :class:`~flexops.unit_models.base.siso.SISOBlockData`; adds only the
@@ -68,8 +68,9 @@ class PumpData(SISOBlockData):
       ``energy_intensity`` is in kWh/m^3 and the outlet ``flow_vol_phase`` in
       m^3/hr, so kWh/m^3 * m^3/hr = kWh/hr = kW -- dimensionally exact with no
       fudge factor. The Constraint is named ``power_electrical_relation`` (the
-      swap contract, R11) and ``energy_intensity`` is a fixed, regressable Var,
-      so FlexParameterize can unfix and fit it, or swap the relation for a
+      same name every constant-intensity unit uses for its power relation, so
+      relations are swappable) and ``energy_intensity`` is a fixed, regressable
+      Var, so FlexParameterize can unfix and fit it, or swap the relation for a
       richer one, exactly as on any other constant-intensity unit.
 
     * ``"hydraulic"``:

@@ -1,11 +1,11 @@
 """The ``get_solver`` facade and the thin :class:`SolverFacade` wrapper.
 
 ``get_solver`` picks the best available solver for a problem class and errors
-loudly when none qualifies — it **never** transforms the model
-(``plan/01_architecture.md`` §2.2): no integrality relaxation, no decomposition,
-no trust regions. MINLP routes to SCIP (the default open-source MINLP solver)
-when installed; with no MINLP-capable solver available it is a hard error
-pointing at SCIP or ``flexschedule.SolveSequence``, not silent model surgery.
+loudly when none qualifies — it **never** transforms the model: no integrality
+relaxation, no decomposition, no trust regions. MINLP routes to SCIP (the
+default open-source MINLP solver) when installed; with no MINLP-capable
+solver available it is a hard error pointing at SCIP or
+``flexschedule.SolveSequence``, not silent model surgery.
 
 IPOPT is bound to idaes's HSL-built binary (``idaes.bin_directory/ipopt``, whose
 default linear solver is ``ma27``) when idaes is importable, rather than the

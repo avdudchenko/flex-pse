@@ -4,12 +4,12 @@ A whole flex-pse model and run are built from a single version-controlled
 config artifact (``flexops.build_model(config)``): the TimeBlock,
 properties, costing, and the network/plant/unit tree all come from one
 :class:`ModelConfig`. These pydantic models are the **authority** for that
-config (``plan/01_architecture.md`` §2.3); JSON is the canonical
-and only on-disk format (see :mod:`flexcore.config.io`).
+config; JSON is the canonical and only on-disk format (see
+:mod:`flexcore.config.io`).
 
 Every field carries a ``description`` (it renders into the docs) and every model
-forbids unknown keys (``plan/00_conventions.md`` §4: an undocumented key does
-not get to exist). Only the persisted (Layer-1) config lives here; runtime Pyomo
+forbids unknown keys (an undocumented key does not get to exist). Only the
+persisted (Layer-1) config lives here; runtime Pyomo
 ``ConfigDict`` options are a separate layer and are never serialized.
 
 Class docstrings and field descriptions here are exported verbatim into the
@@ -27,7 +27,8 @@ CURRENT_SCHEMA_VERSION = "0.0.3"
 
 
 class _StrictModel(BaseModel):
-    """Base for every config model: reject undocumented keys (conventions §4)."""
+    """Base for every config model: reject undocumented keys (an undocumented
+    key does not get to exist)."""
 
     model_config = ConfigDict(extra="forbid")
 

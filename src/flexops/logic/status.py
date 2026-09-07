@@ -1,4 +1,4 @@
-"""UC status base: ``add_status`` + ``relax``/``unrelax`` (M08, architecture §3.5).
+"""UC status base: ``add_status`` + ``relax``/``unrelax``.
 
 ``add_status`` is the base unit-commitment piece, present on **every unit that
 can be shut off** (a ``Tank`` disables it). It attaches a Binary
@@ -13,9 +13,9 @@ attaches to a private list on the unit, ``_flexops_logic_binaries``, so a single
 
 **Relaxation policy.** The per-unit ``relaxation`` config
 (:class:`~flexops.core.ops_block.RelaxationPolicy`, values ``"exact"`` /
-``"relaxed"``, M03) both *permit* relaxation in v0, so ``relax`` never refuses.
-A hard "never relax" policy (the milestone's optional ``"never"`` value) is
-post-v0: it would require a new ``RelaxationPolicy`` value, i.e. editing M03.
+``"relaxed"``) both *permit* relaxation in v0, so ``relax`` never refuses.
+A hard "never relax" policy is planned future work but not yet implemented:
+it would require adding a new ``RelaxationPolicy`` value.
 """
 
 import enum
@@ -41,9 +41,10 @@ def _register_rolling_state(
 ) -> None:
     """Record a Var whose trailing ``k``-step history crosses rolling-horizon windows.
 
-    Registration only: M12's rolling-horizon driver is what will read a
+    Registration only: a rolling-horizon scheduling driver that will read a
     solved window's trailing values and fix the next window's initial state
-    from them; that consumption logic is out of scope here (M08).
+    from them is planned but not yet implemented; that consumption logic is
+    out of scope here.
 
     Args:
         unit: The unit block the Var lives on.

@@ -2,8 +2,7 @@
 
 A :class:`TagMap` renames the columns of a tabular data set onto **model
 aliases** — the dotted ``plant.unit.variable`` names by which the rest of
-FlexParameterize refers to a built model's registered variables
-(``plan/01_architecture.md`` §5).
+FlexParameterize refers to a built model's registered variables.
 
 FlexParameterize is data-source agnostic. The keys of a ``TagMap`` are whatever
 the source called its columns — a historian tag (``"PIT-101.PV"``), a
@@ -109,7 +108,7 @@ class TagMap:
 
     @classmethod
     def from_file(cls, path) -> "TagMap":
-        """Load a tag map from a JSON file (the config format, architecture §2.3).
+        """Load a tag map from a JSON file (the config format).
 
         Args:
             path: Path to a ``.json`` file holding a flat object of

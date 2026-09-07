@@ -1,4 +1,4 @@
-r"""Splitter(OpsBlockData): one inlet fanned out to N named outlets (§3.2, §3.4).
+r"""Splitter(OpsBlockData): one inlet fanned out to N named outlets.
 
 The mirror of :class:`~flexops.unit_models.mixer.Mixer`: one stream divided
 among an arbitrary number of outlets. Its port count is a config option, so no

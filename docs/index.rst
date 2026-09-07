@@ -1,13 +1,14 @@
 flex-pse
 ========
 
-An open-source Pyomo/IDAES platform for industrial energy-flexibility
-design and operations optimization.
+flex-pse is an open-source Pyomo/IDAES platform. Use it to design and
+schedule flexible industrial energy operations.
 
 .. toctree::
    :maxdepth: 2
    :caption: Getting started
 
+   getting_started/installation
    getting_started/ten_minutes
 
 .. toctree::
@@ -19,6 +20,7 @@ design and operations optimization.
    explanation/relaxation_policies
    explanation/config_schema
    explanation/energy_nomenclature
+   explanation/reported_cost
    explanation/pass_through_and_bypass
 
 .. toctree::
@@ -27,6 +29,18 @@ design and operations optimization.
 
    how_to/build_a_plant
    how_to/parameterize_from_data
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Examples
+
+   examples/index
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Release notes
+
+   changelog
 
 .. toctree::
    :maxdepth: 2

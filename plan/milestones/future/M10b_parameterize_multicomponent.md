@@ -1,5 +1,10 @@
 # M10b — Multi-dimensional surrogates + multi-component properties
 
+> **Deferred to 0.2.** Not in scope for 0.1.0 — see `PLAN.md` §4. M11 does not
+> depend on this milestone and was rewritten to not assume any of it (see M11's
+> own update note); the plan below is retained as a draft, not a live spec, and
+> may be revised before 0.2 work begins.
+
 **Effort:** 4 days (may split into two milestones at the M10b/M10c seam below)
 · **Depends on:** M10 · **Parallelizable:** with M11, M12
 

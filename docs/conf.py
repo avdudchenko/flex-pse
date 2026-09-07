@@ -1,20 +1,24 @@
-"""Sphinx configuration for flex-pse.
+"""Sphinx configuration for flex-pse."""
 
-See ``plan/03_documentation.md`` §1 for the layout and tooling this mirrors.
-"""
+import sys
+from importlib.metadata import version as _dist_version
+from pathlib import Path
 
-import os
+sys.path.insert(0, str(Path(__file__).parent / "_ext"))
 
 project = "flex-pse"
 copyright = "2025, flex-pse contributors"
 author = "flex-pse contributors"
+release = _dist_version("flex-pse")
+version = release
 
 extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
-    "myst_nb",
+    "myst_parser",
+    "flexdoc",
 ]
 
 templates_path = ["_templates"]
@@ -31,17 +35,15 @@ intersphinx_mapping = {
     "numpy": ("https://numpy.org/doc/stable/", None),
 }
 
-# Fast local iteration skips notebook execution; the docs CI gate (M14) runs
-# with execution on. See plan/03_documentation.md §4/§6.
-nb_execution_mode = os.environ.get("NB_EXECUTION_MODE", "cache")
-
 nitpicky = True
 nitpick_ignore = [
     # Artifacts of the IDAES-generated ProcessBlock wrapper docstring.
     ("py:class", "function"),
     ("py:class", "class"),
-    # flexcore.exceptions has no reference page yet (added in a later
-    # milestone); TimeBlock's and get_solver's Raises: entries point at it.
+    # Sphinx's default_role cross-reference resolves a bare exception name
+    # (e.g. "FlexConfigError" in a Raises: block) against the current module,
+    # not the class's own page, so it needs the fully-qualified name to
+    # resolve -- most Raises: entries were written with the short name.
     ("py:exc", "FlexConfigError"),
     ("py:exc", "FlexSolverError"),
     # pydantic documents its validation error under pydantic_core, so the name

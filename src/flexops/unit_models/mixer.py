@@ -1,4 +1,4 @@
-r"""Mixer(OpsBlockData): N named inlets joined into one outlet (§3.2, §3.4).
+r"""Mixer(OpsBlockData): N named inlets joined into one outlet.
 
 A mixing junction: an arbitrary number of streams joined into one. Its port
 count is a config option, so no fixed-arity IO-topology base fits — it

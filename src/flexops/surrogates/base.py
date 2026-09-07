@@ -2,8 +2,8 @@
 
 A ``Surrogate`` turns a :class:`~flexcore.config.schema.SurrogateSpec`'s
 opaque ``data`` mapping into Pyomo objects. It validates that mapping in
-``__init__`` (conventions §4: no opaque nested JSON blob passes unvalidated),
-so a malformed relationship fails at construction, not mid-solve.
+``__init__`` (no opaque nested JSON blob passes unvalidated), so a malformed
+relationship fails at construction, not mid-solve.
 :meth:`~flexops.core.ops_block.OpsBlockData.swap_relation` is the only caller
 of :meth:`Surrogate.build`.
 """

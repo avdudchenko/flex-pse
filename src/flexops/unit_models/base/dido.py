@@ -1,4 +1,4 @@
-"""DIDOBlock: the double-inlet/double-outlet IO-topology base (§3.4).
+"""DIDOBlock: the double-inlet/double-outlet IO-topology base.
 
 The third IO-topology base class: two inlet and two outlet ports, with the two
 per-stream mass balances **coupled** by a single transfer term — the fraction of

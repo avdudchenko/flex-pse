@@ -1,5 +1,9 @@
 # M13 — Set-point extraction + smoothing + cost reporting
 
+> **Deferred to 0.2.** Not in scope for 0.1.0 — see `PLAN.md` §4. M14/M15 no
+> longer depend on this milestone; the plan below is retained as a draft, not a
+> live spec, and may be revised before 0.2 work begins.
+
 **Effort:** 1–2 days · **Depends on:** M12 · **Parallelizable:** no
 
 ## Goal

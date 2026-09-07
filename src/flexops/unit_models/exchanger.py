@@ -1,4 +1,4 @@
-r"""Exchanger(DIDOBlock): two coupled streams exchanging mass/energy (§3.4, R6).
+r"""Exchanger(DIDOBlock): two coupled streams exchanging mass/energy.
 
 Inherits its two inlet/two outlet ports, ``transfer_fraction``, and the coupled
 per-stream mass balances from

@@ -1,4 +1,4 @@
-"""SIDOBlock: the single-inlet/double-outlet (split) IO-topology base (§3.4).
+"""SIDOBlock: the single-inlet/double-outlet (split) IO-topology base.
 
 The second IO-topology base class: owns port construction (via the inherited
 :meth:`~flexops.core.ops_block.OpsBlockData.add_stream_ports`) and the split

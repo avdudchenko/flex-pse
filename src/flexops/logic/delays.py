@@ -1,8 +1,9 @@
-"""Optional UC piece: startup/response delay tied to an upstream unit (M08, §3.5).
+"""Optional UC piece: startup/response delay tied to an upstream unit.
 
 The single-hop primitive behind the chemical-stabilization delay *chains* of
-Rao et al. 2024 (full chain templates are post-v0, PLAN.md §4): a unit may not
-start (or be on) until ``k`` steps after an upstream unit's status.
+Rao et al. 2024: a unit may not start (or be on) until ``k`` steps after an
+upstream unit's status. Full chain templates composing several of these
+single-hop primitives are planned future work but not yet implemented.
 """
 
 from typing import Any

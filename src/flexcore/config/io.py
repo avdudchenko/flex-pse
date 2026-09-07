@@ -245,7 +245,7 @@ def _resolve_surrogate_sources(cfg: ModelConfig, base_dir) -> ModelConfig:
     """Fill in every unit surrogate that names a sidecar file.
 
     Called once at the config boundary so nothing downstream ever sees a spec
-    whose coefficients are still on disk (conventions §4).
+    whose coefficients are still on disk.
 
     Args:
         cfg: The validated config, mutated in place.

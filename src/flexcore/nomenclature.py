@@ -1,4 +1,4 @@
-"""Canonical energy-variable names for flex-pse (project standard, §4).
+"""Canonical energy-variable names for flex-pse.
 
 Every unit model registers at least one power draw through
 :meth:`flexops.core.ops_block.OpsBlockData.register_power`, using one of the
@@ -19,7 +19,7 @@ applies its own fuel heating-value assumption).
 The names live here as constants so a typo becomes an import error rather than a
 silently-unaggregated variable. Do not hand-type the string values anywhere
 else, and never introduce a variable named bare ``power``, ``energy``, or
-``work`` (``plan/00_conventions.md`` §2, ``plan/01_architecture.md`` §4).
+``work``.
 """
 
 import enum

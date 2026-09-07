@@ -1,8 +1,9 @@
 """The frozen public API (PLAN.md §2).
 
-**Breaking-change tripwire.** ``examples/api_freeze.py`` is the frozen
-user-facing API script. Any pull request that has to edit it — or this test — to
-stay green is making a **breaking change** and must say so in its description.
+**Breaking-change tripwire.** ``fixtures/api_freeze/api_freeze.py`` is the
+frozen user-facing API script. Any pull request that has to edit it — or this
+test — to stay green is making a **breaking change** and must say so in its
+description.
 """
 
 import math
@@ -18,14 +19,14 @@ from flexcore.config.io import load_model_config
 from flexcore.solvers import get_solver
 from flexops import build_model
 
-_EXAMPLES = Path(__file__).parents[3] / "examples"
-_SCRIPT = _EXAMPLES / "api_freeze.py"
-_CONFIG = _EXAMPLES / "api_freeze_config.json"
-_DATA = _EXAMPLES / "data"
+_FIXTURES = Path(__file__).parent / "fixtures" / "api_freeze"
+_SCRIPT = _FIXTURES / "api_freeze.py"
+_CONFIG = _FIXTURES / "api_freeze_config.json"
+_DATA = _FIXTURES / "data"
 
 
 def _in_fixture_dir(tmp_path, monkeypatch) -> None:
-    """Copy the example data fixtures into ``tmp_path`` and chdir there.
+    """Copy the tariff/DR data fixtures into ``tmp_path`` and chdir there.
 
     The frozen script loads bare filenames (``"tariff.json"``), so it runs with
     the working directory set to where those fixtures live.

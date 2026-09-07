@@ -1,4 +1,4 @@
-"""Shared checks for the config-driven-arity flow junctions (architecture §3.4).
+"""Shared checks for the config-driven-arity flow junctions.
 
 :class:`~flexops.unit_models.mixer.Mixer` and
 :class:`~flexops.unit_models.splitter.Splitter` both take their port count from

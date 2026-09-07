@@ -412,7 +412,7 @@ def find_time_block(model) -> TimeBlockData:
 
     The auto-discovery convenience behind every block that takes an optional
     ``time_block=``: an explicit argument is the primary path, and this is what
-    resolves the omitted one (architecture §3.3).
+    resolves the omitted one.
 
     Args:
         model: The Pyomo model (or block) to search, sub-blocks included.

@@ -3,8 +3,7 @@
 The classifier walks a model's *active* constraints and objective, inspects
 each expression's polynomial degree, and inspects which variables are discrete,
 to decide the smallest problem class that describes the model. It never
-transforms the model (``plan/01_architecture.md`` §2.2) — it only
-reports.
+transforms the model — it only reports.
 """
 
 import enum

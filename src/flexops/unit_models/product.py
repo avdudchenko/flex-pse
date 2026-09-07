@@ -1,5 +1,4 @@
-r"""Product(OpsBlockData): a boundary sink with N named inlets and no outlets
-(§3.2, §3.4).
+r"""Product(OpsBlockData): a boundary sink with N named inlets and no outlets.
 
 This is the mirror image of :class:`~flexops.unit_models.feed.Feed`, and it
 models the delivery side of the facility. A ``Product`` adds up everything

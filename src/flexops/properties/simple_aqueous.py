@@ -1,4 +1,4 @@
-"""SimpleAqueousFlow: the minimal flow-carrying property package (§3.7).
+"""SimpleAqueousFlow: the minimal flow-carrying property package.
 
 A minimal IDAES ``PhysicalParameterBlock``/``StateBlock`` pair carrying a
 volumetric flow, structurally modeled on WaterTAP's zero-order package
