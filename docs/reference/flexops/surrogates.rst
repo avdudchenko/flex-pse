@@ -65,15 +65,10 @@ constant term, read in the declared output units.
    :nosignatures:
 
    MultilinearSurrogate
+   ArimaSurrogate
 
 Not yet implemented
---------------------
-
-Each of these is registered in
-:data:`~flexops.surrogates.surrogates.SURROGATES` and
-raises ``NotImplementedError`` at construction, naming
-:class:`~flexops.surrogates.multilinear.MultilinearSurrogate` as the
-implemented alternative.
+-------------------
 
 .. currentmodule:: flexops.surrogates
 
@@ -83,7 +78,6 @@ implemented alternative.
 
    QuadraticSurrogate
    ExponentialSurrogate
-   ArimaSurrogate
    NeuralNetworkSurrogate
 
 ``SurrogateType.CONSTANT_INTENSITY`` has no class here at all: it fixes a

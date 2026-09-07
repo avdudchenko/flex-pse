@@ -73,9 +73,6 @@ os.makedirs(FIG_DIR, exist_ok=True)
 DATA_PATH = os.path.join(
     os.path.dirname(__file__),
     "..",
-    "..",
-    "..",
-    "flexparameterize",
     "tests",
     "test_time_series_data",
     "imputed_bio_gas_generation.csv",
@@ -115,7 +112,7 @@ def fit_model(X, y, order=None, auto=False, max_p=3, max_q=3):
         print("Trying auto ARIMA (stationary=True)...")
         regressor = ArimaRegressor(auto=True, max_p=max_p, max_q=max_q, stationary=True)
         regressor.fit(X, y)
-        print(f"  Auto selected: order={regressor._order}")
+        print(f"  Auto selected: order={regressor.order}")
         return regressor
     elif order is not None:
         print(f"Fitting ARIMA{order}...")

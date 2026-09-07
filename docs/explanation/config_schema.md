@@ -71,9 +71,11 @@ class** — one of {class}`~flexcore.config.schema.SurrogateType`'s members —
 and carries an opaque `data` mapping in the shape that class defines. The
 class (`flexops.surrogates`) validates `data` and builds the Pyomo
 relationship; a type not yet implemented raises `NotImplementedError` when the
-model is built, not when the config is validated (`quadratic`, `exponential`,
-`arima`, and `neural_network` are reserved names today with no implementation
-yet — see {doc}`../reference/flexops/surrogates`).
+model is built, not when the config is validated. `arima` is now implemented by
+{class}`~flexops.surrogates.arima.ArimaSurrogate` and paired with
+{class}`~flexparameterize.regression.arima.ArimaRegressor`; `neural_network`
+remains reserved without an implementation today — see
+{doc}`../reference/flexops/surrogates`).
 
 The only implemented class, `multilinear`
 ({class}`~flexops.surrogates.multilinear.MultilinearSurrogate`), is a constant

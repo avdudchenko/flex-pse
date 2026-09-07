@@ -191,7 +191,7 @@ def _build_and_get_body(p=1, q=0, n_exog=2, n_resid=96):
 
 @pytest.mark.unit
 def test_build_creates_params_but_not_its_own_constraint():
-    """build() attaches Params but does not itself enforce target==body.
+    """build() does not itself enforce target==body.
 
     Enforcing the relationship is swap_relation's job (it builds
     "{relation}_fitted"); a surrogate that also builds its own enforcing
@@ -200,36 +200,29 @@ def test_build_creates_params_but_not_its_own_constraint():
     """
     m, unit, body, surrogate = _build_and_get_body(p=1, q=0, n_exog=2, n_resid=10)
     assert unit.find_component("biogas_m3_hour_arima_eq") is None
-    assert unit.find_component("biogas_m3_hour_arima_const") is not None
-    assert unit.find_component("biogas_m3_hour_arima_ar0") is not None
-    assert unit.find_component("biogas_m3_hour_arima_exog0") is not None
-    assert unit.find_component("biogas_m3_hour_arima_resid0") is not None
-    assert unit.find_component("biogas_m3_hour_arima_y00") is not None
 
 
 @pytest.mark.unit
 def test_build_twice_on_same_target_does_not_collide_or_go_stale():
     """A second build() call on the same unit/target (e.g. re-fit + reswap)
-    gets fresh, uniquely-suffixed Params rather than colliding with (H1) or
-    silently reusing the stale values of (H2) the first call's Params.
+    produces a fresh body with the new coefficients; no components are added
+    to the unit at all, so there is nothing to collide with or go stale.
     """
     m, unit = _make_unit(n_points=5)
     data1 = _minimal_arima_data(p=1, q=0, n_exog=0, n_resid=5)
     data1["const"] = 0.01
     surrogate1 = ArimaSurrogate(data1)
-    surrogate1.build(unit, unit.biogas_m3_hour)
+    body1 = surrogate1.build(unit, unit.biogas_m3_hour)
 
     data2 = _minimal_arima_data(p=1, q=0, n_exog=0, n_resid=5)
     data2["const"] = 0.99
     surrogate2 = ArimaSurrogate(data2)
-    surrogate2.build(unit, unit.biogas_m3_hour)
+    body2 = surrogate2.build(unit, unit.biogas_m3_hour)
 
-    # The first call's Params are untouched (never deleted, never mutated).
-    assert pyo.value(unit.biogas_m3_hour_arima_const) == pytest.approx(0.01)
-    # The second call's Params get a disambiguating suffix, with the new
-    # fit's actual value -- not silently reusing the first call's Param.
-    assert unit.find_component("biogas_m3_hour_arima_v2_const") is not None
-    assert pyo.value(unit.biogas_m3_hour_arima_v2_const) == pytest.approx(0.99)
+    # Both bodies are independent closures with their own coefficients.
+    unit.biogas_m3_hour[0].set_value(1.0)
+    assert pyo.value(body1(0)) == pytest.approx(0.01)
+    assert pyo.value(body2(0)) == pytest.approx(0.99)
 
 
 @pytest.mark.unit
@@ -262,7 +255,8 @@ def test_build_ar1_no_exog_matches_formula():
     unit.biogas_m3_hour[1].set_value(2.0)
     unit.biogas_m3_hour[2].set_value(3.0)
 
-    # t=1: y[1] == 0.01 + 0.5*y[0]  (no MA terms when q=0)
+    # t=1: y[1] == 0.01 + 0.5*y[0]  (y[0] set to 1.0 above; not fixed,
+    # but pyo.value uses the current Var value).
     expr = body(1)
     val = pyo.value(expr)
     expected = 0.01 + 0.5 * 1.0

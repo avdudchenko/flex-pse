@@ -17,19 +17,15 @@ ARIMA relationship.
      "init_values": [y_{-p}, ..., y_{-1}]}   # optional; zeros when absent
 
 :meth:`build` returns a ``body(t)`` callable (per the
-:class:`~flexops.surrogates.base.Surrogate` contract) and attaches the
-coefficient/residual/init-value data it needs as Params — it does **not**
-itself enforce ``target == body``;
+:class:`~flexops.surrogates.base.Surrogate` contract). All trained coefficients,
+constants, residuals, and init values are **inlined directly into the returned
+expression** — no Params are added to ``unit``. ``build`` itself does **not**
+enforce ``target == body``;
 :meth:`~flexops.core.ops_block.OpsBlockData.swap_relation` is the sole place
 that constraint is built (as ``"{relation_name}_fitted"``), so
-ArimaSurrogate does not double up on it. Params are named under a prefix
-unique to each :meth:`build` call (``"{target_name}_arima"``, then
-``"{target_name}_arima_v2"``, ``"_v3"``, ... on repeat swaps of the same
-target) so a re-fit-and-reswap never collides with — or silently reuses the
-stale values of — an earlier swap's Params;
-:meth:`~flexops.core.ops_block.OpsBlockData.swap_relation` tracks and
-deactivates what it can (Constraints), and the old Params are simply left
-unreferenced (components are never deleted, per repo convention).
+ArimaSurrogate does not double up on it. A re-fit-and-reswap simply builds a
+fresh ``body`` with the new coefficients; ``swap_relation`` deactivates the old
+constraint and attaches the new one.
 
 Time indexing
 ~~~~~~~~~~~~~
@@ -42,11 +38,10 @@ equation at index ``t`` is::
 where:
 
 * ``y[t-j]`` for ``t-j >= 0`` is the previous time step's target value;
-  for ``t-j < 0`` it falls back to the ``init_values`` Params (``y0_0``
-  … ``y0_{p-1}`` representing ``y[-p]`` … ``y[-1]``).
+  for ``t-j < 0`` it falls back to the ``init_values`` from ``data``
+  (representing ``y[-p]`` … ``y[-1]``).
 * ``resid[t-j]`` is the fitted residual at time ``t-j`` (0 for
-  ``t-j < 0`` or ``t-j >= n``).  These are stored as Params
-  ``resid_0`` … ``resid_{n-1}``.
+  ``t-j < 0`` or ``t-j >= n``), taken directly from ``data["_residuals"]``.
 * ``eta[t]`` is **not** introduced as a free Var; the surrogate is the
   *mean* ARIMAX relationship (innovations set to zero), which is the
   form useful for optimisation.  The fitted residuals are baked in as
@@ -58,7 +53,6 @@ from __future__ import annotations
 from typing import ClassVar
 
 import pandas as pd
-from pyomo.environ import Param
 from pyomo.environ import units as pyunits
 
 from flexcore.config.schema import SurrogateType
@@ -296,28 +290,15 @@ class ArimaSurrogate(Surrogate):
         Per the :class:`~flexops.surrogates.base.Surrogate` contract, this
         does **not** itself enforce ``target[t] == body(t)`` —
         :meth:`~flexops.core.ops_block.OpsBlockData.swap_relation` is the
-        sole place that constraint is built. This method only attaches the
-        auxiliary data ``body`` needs, as Params on ``unit``:
-
-        * ``"{target_name}_arima{_vN}_const"`` – ``Param`` for the constant term.
-        * ``"{target_name}_arima{_vN}_ar{j}"`` – one ``Param`` per AR coefficient.
-        * ``"{target_name}_arima{_vN}_ma{j}"`` – one ``Param`` per MA coefficient.
-        * ``"{target_name}_arima{_vN}_exog{j}"`` – one ``Param`` per exog coef.
-        * ``"{target_name}_arima{_vN}_resid{t}"`` – one ``Param`` per fitted
-          residual (length ``n``, the number of in-sample rows).
-        * ``"{target_name}_arima{_vN}_y0{j}"`` – one ``Param`` per initial
-          ``y`` value (length ``p``, the AR order).
-
-        ``{_vN}`` is empty on the first call for a given ``target`` and
-        ``_v2``, ``_v3``, ... on every subsequent call (e.g. a re-fit that
-        is swapped in again) so each call's Params get fresh, non-colliding
-        names rather than silently reusing — or crashing on — an earlier
-        call's components.
+        sole place that constraint is built. All trained coefficients,
+        constants, residuals, and init values are inlined directly into the
+        returned expression; no Params or other components are added to
+        ``unit``.
 
         ``body(t)`` is well-defined for every time index ``t``: for
-        ``t < p`` the AR lag terms fall back to the ``y0`` Params; the MA
-        terms use zero for negative residual indices. It never returns
-        ``pyomo.environ.Constraint.Skip``.
+        ``t < p`` the AR lag terms fall back to the ``init_values`` from
+        ``data``; the MA terms use zero for negative residual indices. It
+        never returns ``pyomo.environ.Constraint.Skip``.
 
         Args:
             unit: The :class:`~flexops.core.ops_block.OpsBlockData` the
@@ -420,48 +401,6 @@ class ArimaSurrogate(Surrogate):
                 )
             init_values = [float(training_y_values[offset - 1])]
 
-        # Each `build()` call gets a component-name prefix unique to `unit`,
-        # so a re-fit-and-reswap of the same target never collides with (H1)
-        # or silently reuses the stale values of (H2) an earlier swap's
-        # Params. The first call keeps the plain "{target}_arima" prefix
-        # (matching prior behaviour / existing component-name expectations);
-        # only a second (or later) call on the same target gets "_v2", "_v3", ...
-        _prefix = f"{target.local_name}_arima"
-        _suffix_n = 1
-        while unit.find_component(f"{_prefix}_const") is not None:
-            _suffix_n += 1
-            _prefix = f"{target.local_name}_arima_v{_suffix_n}"
-
-        def _add_param(name_suffix: str, value: float, units=None) -> Param:
-            full_name = f"{_prefix}_{name_suffix}"
-            p_obj = Param(
-                initialize=value,
-                mutable=True,
-                units=units,
-                doc=f"ARIMA: {name_suffix}",
-            )
-            unit.add_component(full_name, p_obj)
-            return p_obj
-
-        const_param = _add_param("const", const, units=output_units)
-        ar_params = [_add_param(f"ar{j}", ar_coefs[j]) for j in range(p)]
-        ma_params = [_add_param(f"ma{j}", ma_coefs[j]) for j in range(q)]
-        exog_params = [
-            _add_param(f"exog{j}", exog_coefs[j]) for j in range(len(exog_names))
-        ]
-        y0_params = [
-            _add_param(
-                f"y0{j}",
-                init_values[j] if j < len(init_values) else init_values[-1],
-                units=output_units,
-            )
-            for j in range(max(p, d))
-        ]
-        resid_params = [
-            _add_param(f"resid{t}", float(residuals[t]), units=output_units)
-            for t in range(n_resid)
-        ]
-
         exog_vars = [
             unit.resolve_variable(name, field="input_variables") for name in exog_names
         ]
@@ -482,7 +421,7 @@ class ArimaSurrogate(Surrogate):
                     # d>0 with offset==0 is rejected earlier in build() (a
                     # d>0 model needs a known value immediately before the
                     # model's start), so d==0 is guaranteed here.
-                    return y0_params[p - lag + t_idx]
+                    return init_values[p - lag + t_idx] * output_units
                 raise FlexConfigError(
                     f"ARIMA AR lag {lag} at model time {t_idx} maps to "
                     f"training index {training_idx}, which is before the "
@@ -531,33 +470,29 @@ class ArimaSurrogate(Surrogate):
             """
             training_idx = offset + t_idx - lag
             if 0 <= training_idx < n_resid:
-                return resid_params[training_idx]
+                return float(residuals[training_idx]) * output_units
             return 0.0 * output_units
 
         def body(t):
             ar_sum = sum(
-                ar_params[j] * (_y_lag(t, j + 1) / output_units) for j in range(p)
+                ar_coefs[j] * (_y_lag(t, j + 1) / output_units) for j in range(p)
             )
             ma_sum = sum(
-                ma_params[j] * (_resid_lag(t, j + 1) / output_units) for j in range(q)
+                ma_coefs[j] * (_resid_lag(t, j + 1) / output_units) for j in range(q)
             )
             exog_sum = sum(
-                exog_params[k]
+                exog_coefs[k]
                 * (pyunits.convert(exog_vars[k][t], exog_units[k]) / exog_units[k])
                 for k in range(len(exog_names))
             )
             if d == 0:
-                return (
-                    const_param / output_units + ar_sum + ma_sum + exog_sum
-                ) * output_units
+                return (const + ar_sum + ma_sum + exog_sum) * output_units
             else:
                 # d=1: y[t] = y[t-1] + c + AR(differences) + MA + exog
                 if int(t) == 0:
-                    prev_y = y0_params[0] / output_units
+                    prev_y = init_values[0]
                 else:
                     prev_y = target[t - 1] / output_units
-                return (
-                    prev_y + const_param / output_units + ar_sum + ma_sum + exog_sum
-                ) * output_units
+                return (prev_y + const + ar_sum + ma_sum + exog_sum) * output_units
 
         return body

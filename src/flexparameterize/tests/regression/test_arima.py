@@ -328,9 +328,9 @@ def test_auto_arima_selects_order():
     regressor = ArimaRegressor(
         auto=True, max_p=2, max_q=2, max_ar_persistence=None
     ).fit(pd.DataFrame(index=idx), y)
-    assert regressor._order is not None
-    assert len(regressor._order) == 3
-    assert all(isinstance(v, int) for v in regressor._order)
+    assert regressor.order is not None
+    assert len(regressor.order) == 3
+    assert all(isinstance(v, int) for v in regressor.order)
     result = regressor.to_fit_result()
     assert np.isfinite(result.metrics["aic"])
 
@@ -414,7 +414,7 @@ def test_d_greater_than_zero_raises():
         ArimaRegressor(order=(1, 2, 0))
     # d=1 should NOT raise during construction
     regressor = ArimaRegressor(order=(1, 1, 0))
-    assert regressor._order == (1, 1, 0)
+    assert regressor.order == (1, 1, 0)
 
 
 @pytest.mark.unit
@@ -438,7 +438,7 @@ def test_seasonal_P_or_Q_greater_than_zero_raises():
         ArimaRegressor(order=(1, 0, 0), seasonal_order=(0, 0, 1, 24))
     # The trivial (0, 0, 0, m) seasonal order is accepted (a no-op).
     regressor = ArimaRegressor(order=(1, 0, 0), seasonal_order=(0, 0, 0, 24))
-    assert regressor._seasonal_order == (0, 0, 0, 24)
+    assert regressor.seasonal_order == (0, 0, 0, 24)
 
 
 @pytest.mark.unit
@@ -495,8 +495,8 @@ def test_auto_arima_respects_d_zero():
     regressor = ArimaRegressor(
         auto=True, max_p=2, max_q=2, max_d=1, max_ar_persistence=None
     ).fit(pd.DataFrame(index=idx), y)
-    assert regressor._order is not None
-    assert regressor._order[1] == 0  # d must be 0
+    assert regressor.order is not None
+    assert regressor.order[1] == 0  # d must be 0
 
 
 @pytest.mark.unit
@@ -533,7 +533,7 @@ def test_low_ar_persistence_passes():
     regressor = ArimaRegressor(order=(1, 0, 0), max_ar_persistence=1.0).fit(
         pd.DataFrame(index=idx), y
     )
-    assert regressor._fitted is True
+    assert regressor.fitted is True
 
 
 # -- registry -----------------------------------------------------------------
@@ -570,8 +570,8 @@ def test_fits_arima_d1_no_exog():
     regressor = ArimaRegressor(order=(1, 1, 0), max_ar_persistence=None).fit(
         pd.DataFrame(index=idx), y
     )
-    assert regressor._fitted is True
-    assert regressor._order == (1, 1, 0)
+    assert regressor.fitted is True
+    assert regressor.order == (1, 1, 0)
     assert regressor.model.model.k_diff == 1
 
     # predict should return original-scale values
@@ -711,7 +711,7 @@ def test_sufficiently_sized_order_still_fits():
     regressor = ArimaRegressor(order=(1, 0, 0), max_ar_persistence=None).fit(
         pd.DataFrame(index=idx), y
     )
-    assert regressor._fitted is True
+    assert regressor.fitted is True
 
 
 # -- predict(dynamic=False) (M4) -----------------------------------------------

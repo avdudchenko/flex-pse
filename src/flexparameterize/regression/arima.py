@@ -120,7 +120,8 @@ class ArimaRegressor:
             compatibility.  AutoARIMA is restricted to ``d=0`` and ``D=0``.
         auto_kwargs: Extra keyword arguments forwarded to ``AutoARIMA``
             (e.g. ``max_p``, ``max_q``, ``max_P``, ``season_length``).
-            Note: ``d`` and ``D`` are forced to 0 and cannot be overridden.
+            ``d`` and ``D`` default to 0 via ``setdefault``; pass them
+            explicitly to override.
         max_ar_persistence: Maximum allowed absolute value for any AR
             coefficient.  Default ``0.85``.  Set to ``None`` to disable
             this check.
@@ -370,13 +371,10 @@ class ArimaRegressor:
             fitted_values = fitted_values.values
         self._fitted_values = fitted_values
 
-        p, d, q = self._order  # type: ignore[misc]
-        if d > 0:
-            y_for_rmse = np.diff(y_values, n=d)
-        else:
-            y_for_rmse = y_values
-        residual_ss = float(np.nansum((y_for_rmse - fitted_values) ** 2))
-        rmse = math.sqrt(residual_ss / len(y_for_rmse))
+        fitted_level = fitted_model.fittedvalues_level
+        valid = ~np.isnan(fitted_level)
+        residual_ss = float(np.nansum((y_values[valid] - fitted_level[valid]) ** 2))
+        rmse = math.sqrt(residual_ss / max(valid.sum(), 1))
         aic = float(fitted_model.aic)
 
         self.metrics = {"aic": aic, "rmse": rmse}
@@ -434,6 +432,21 @@ class ArimaRegressor:
                 self.model.model.param_names, self.model.params, strict=True
             )
         }
+
+    @property
+    def order(self) -> tuple[int, int, int] | None:
+        """The fitted ``(p, d, q)`` order, or ``None`` before :meth:`fit`."""
+        return self._order
+
+    @property
+    def seasonal_order(self) -> tuple[int, int, int, int] | None:
+        """The fitted seasonal order, or ``None`` before :meth:`fit`."""
+        return self._seasonal_order
+
+    @property
+    def fitted(self) -> bool:
+        """``True`` once :meth:`fit` has succeeded."""
+        return self._fitted
 
     def _params(self) -> dict[str, float]:
         """Return the fitted model's named parameters as a flat dict.
@@ -639,7 +652,12 @@ class ArimaRegressor:
         bic = float(m_["bic"])
         aicc = float(m_["aicc"])
         sigma2 = float(m_["sigma2"])
-        rmse = math.sqrt(float(np.nansum(residuals**2) / n))
+        fitted_level = self.model.fittedvalues_level
+        valid = ~np.isnan(fitted_level)
+        rmse = math.sqrt(
+            float(np.nansum((self._y_values[valid] - fitted_level[valid]) ** 2))
+            / max(valid.sum(), 1)
+        )
 
         return {
             "aic": aic,
