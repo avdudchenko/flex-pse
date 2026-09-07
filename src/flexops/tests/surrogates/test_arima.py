@@ -5,9 +5,8 @@ necessary IO variables is built, :meth:`ArimaSurrogate.build` is called, and
 the resulting constraint expression is evaluated numerically to confirm it
 reproduces the fitted ARIMA formula.
 
-A key cross-validation test (``test_pyomo_matches_statsforecast``) evaluates
-the Pyomo constraint against the statsforecast fitted values to ensure
-identical output within tolerance.
+Tests that require ``flexparameterize`` live in
+``flexparameterize/tests/regression/test_arima_surrogate.py``.
 """
 
 from __future__ import annotations
@@ -191,14 +190,61 @@ def _build_and_get_body(p=1, q=0, n_exog=2, n_resid=96):
 
 
 @pytest.mark.unit
-def test_build_creates_constraint_and_params():
+def test_build_creates_params_but_not_its_own_constraint():
+    """build() attaches Params but does not itself enforce target==body.
+
+    Enforcing the relationship is swap_relation's job (it builds
+    "{relation}_fitted"); a surrogate that also builds its own enforcing
+    Constraint would double up on it every time it is swapped in through
+    the documented register_relation/swap_relation path.
+    """
     m, unit, body, surrogate = _build_and_get_body(p=1, q=0, n_exog=2, n_resid=10)
-    assert unit.find_component("biogas_m3_hour_arima_eq") is not None
+    assert unit.find_component("biogas_m3_hour_arima_eq") is None
     assert unit.find_component("biogas_m3_hour_arima_const") is not None
     assert unit.find_component("biogas_m3_hour_arima_ar0") is not None
     assert unit.find_component("biogas_m3_hour_arima_exog0") is not None
     assert unit.find_component("biogas_m3_hour_arima_resid0") is not None
     assert unit.find_component("biogas_m3_hour_arima_y00") is not None
+
+
+@pytest.mark.unit
+def test_build_twice_on_same_target_does_not_collide_or_go_stale():
+    """A second build() call on the same unit/target (e.g. re-fit + reswap)
+    gets fresh, uniquely-suffixed Params rather than colliding with (H1) or
+    silently reusing the stale values of (H2) the first call's Params.
+    """
+    m, unit = _make_unit(n_points=5)
+    data1 = _minimal_arima_data(p=1, q=0, n_exog=0, n_resid=5)
+    data1["const"] = 0.01
+    surrogate1 = ArimaSurrogate(data1)
+    surrogate1.build(unit, unit.biogas_m3_hour)
+
+    data2 = _minimal_arima_data(p=1, q=0, n_exog=0, n_resid=5)
+    data2["const"] = 0.99
+    surrogate2 = ArimaSurrogate(data2)
+    surrogate2.build(unit, unit.biogas_m3_hour)
+
+    # The first call's Params are untouched (never deleted, never mutated).
+    assert pyo.value(unit.biogas_m3_hour_arima_const) == pytest.approx(0.01)
+    # The second call's Params get a disambiguating suffix, with the new
+    # fit's actual value -- not silently reusing the first call's Param.
+    assert unit.find_component("biogas_m3_hour_arima_v2_const") is not None
+    assert pyo.value(unit.biogas_m3_hour_arima_v2_const) == pytest.approx(0.99)
+
+
+@pytest.mark.unit
+def test_build_d1_offset_zero_raises():
+    """A d>0 surrogate whose model starts exactly at the training start has
+    no known "value before start" to fall back to, and must raise rather
+    than silently substitute an unrelated value.
+    """
+    m, unit = _make_unit(n_points=5)
+    data = _minimal_arima_data(p=1, q=0, n_exog=0, n_resid=5)
+    data["order"] = [1, 1, 0]
+    data["init_values"] = [0.0]
+    surrogate = ArimaSurrogate(data)
+    with pytest.raises(FlexConfigError, match="d=1"):
+        surrogate.build(unit, unit.biogas_m3_hour)
 
 
 @pytest.mark.unit
@@ -486,4 +532,71 @@ def test_pyomo_ar1_matches_manual_formula():
     for t in range(1, n):
         pyomo_val = pyo.value(body(t))
         expected = const + ar1 * y_vals[t - 1]
+        assert pyomo_val == pytest.approx(expected, rel=1e-3)
+
+
+@pytest.mark.unit
+def test_build_arima_d1_matches_formula():
+    """Pyomo ARIMA(1,1,0) reproduces the differenced AR formula."""
+    np.random.seed(42)
+    n = 20
+    phi = 0.5
+    const = 0.1
+    y_vals = np.zeros(n + 1)  # extra point for offset=1
+    for t in range(1, n + 1):
+        y_vals[t] = (
+            y_vals[t - 1]
+            + const
+            + phi * (y_vals[t - 1] - y_vals[t - 2])
+            + np.random.normal(0, 0.01)
+        )
+
+    m = pyo.ConcreteModel()
+    m.time_block = TimeBlock(
+        start_date="2025-01-01T01:00",
+        end_date="2025-01-01T21:00",
+        time_step=1 * pyunits.hr,
+    )
+    m.props = SimpleAqueousFlow(has_pressure=False)
+    m.unit = OpsBlock(property_package=m.props)
+    m.unit.add_stream_ports()
+    m.unit.add_component(
+        "y",
+        pyo.Var(
+            m.time_block.time_index, initialize=0.0, units=pyunits.m**3 / pyunits.hr
+        ),
+    )
+    m.unit.register_io_variable(m.unit.y, role="output")
+
+    data = {
+        "input_variables": {},
+        "output_variables": {"y": "m^3/hr"},
+        "exogenous_variables": [],
+        "order": [1, 1, 0],
+        "const": const,
+        "ar_coefs": [phi],
+        "ma_coefs": [],
+        "exog_coefs": [],
+        "init_values": [float(y_vals[0])],
+        "_residuals": [0.0] * n,
+        "training_start_date": "2025-01-01T00:00:00",
+        "training_time_step_seconds": 3600.0,
+        "training_y_values": y_vals.tolist(),
+    }
+    surrogate = ArimaSurrogate(data)
+    body = surrogate.build(m.unit, m.unit.y)
+
+    # Fix y values for all time points (model starts at offset=1, so y[t] = y_vals[t+1])
+    for t in range(n):
+        m.unit.y[t].set_value(float(y_vals[t + 1]))
+        m.unit.y[t].fix()
+
+    # For d=1, body(t) references target[t-1], so start from t=1
+    for t in range(1, n):
+        pyomo_val = pyo.value(body(t))
+        # d=1 formula: y[t] = y[t-1] + c + phi * (y[t-1] - y[t-2])
+        # Model starts at offset=1, so training index = offset + t
+        y_t_minus_1 = y_vals[t]  # target[t-1] = y_vals[offset + t - 1] = y_vals[t]
+        y_t_minus_2 = y_vals[t - 1]  # training_y_values[offset + t - 2] = y_vals[t - 1]
+        expected = y_t_minus_1 + const + phi * (y_t_minus_1 - y_t_minus_2)
         assert pyomo_val == pytest.approx(expected, rel=1e-3)

@@ -16,10 +16,20 @@ ARIMA relationship.
      "_residuals": [r_0, ..., r_{n-1}],   # fitted in-sample residuals
      "init_values": [y_{-p}, ..., y_{-1}]}   # optional; zeros when absent
 
-The surrogate builds a Pyomo Constraint named
-``"{target_name}_arima_eq"`` and stores fitted residuals as Params so
-:meth:`~flexops.core.ops_block.OpsBlockData.swap_relation` can track the
-added components across swaps.
+:meth:`build` returns a ``body(t)`` callable (per the
+:class:`~flexops.surrogates.base.Surrogate` contract) and attaches the
+coefficient/residual/init-value data it needs as Params — it does **not**
+itself enforce ``target == body``;
+:meth:`~flexops.core.ops_block.OpsBlockData.swap_relation` is the sole place
+that constraint is built (as ``"{relation_name}_fitted"``), so
+ArimaSurrogate does not double up on it. Params are named under a prefix
+unique to each :meth:`build` call (``"{target_name}_arima"``, then
+``"{target_name}_arima_v2"``, ``"_v3"``, ... on repeat swaps of the same
+target) so a re-fit-and-reswap never collides with — or silently reuses the
+stale values of — an earlier swap's Params;
+:meth:`~flexops.core.ops_block.OpsBlockData.swap_relation` tracks and
+deactivates what it can (Constraints), and the old Params are simply left
+unreferenced (components are never deleted, per repo convention).
 
 Time indexing
 ~~~~~~~~~~~~~
@@ -48,7 +58,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 import pandas as pd
-from pyomo.environ import Constraint, Param
+from pyomo.environ import Param
 from pyomo.environ import units as pyunits
 
 from flexcore.config.schema import SurrogateType
@@ -187,7 +197,7 @@ class ArimaSurrogate(Surrogate):
                     value=seasonal,
                 )
 
-        p, _d, q = order
+        p, d, q = order
         ar_coefs = self.data["ar_coefs"]
         ma_coefs = self.data["ma_coefs"]
         exog_coefs = self.data["exog_coefs"]
@@ -238,10 +248,11 @@ class ArimaSurrogate(Surrogate):
 
         init = self.data.get("init_values")
         if init is not None:
-            if not isinstance(init, list) or len(init) != p:
+            expected_len = p if d == 0 else d
+            if not isinstance(init, list) or len(init) != expected_len:
                 raise FlexConfigError(
-                    f"ARIMA 'init_values' must be a list of {p} floats "
-                    f"(matching AR order p={p}), got {init!r}.",
+                    f"ARIMA 'init_values' must be a list of {expected_len} floats "
+                    f"(matching d={d}), got {init!r}.",
                     field="init_values",
                     value=init,
                 )
@@ -280,25 +291,33 @@ class ArimaSurrogate(Surrogate):
         return dict(self.data["output_variables"])
 
     def build(self, unit, target):
-        """Return ``body(t)`` enforcing the ARIMA equation at time ``t``.
+        """Return ``body(t)`` evaluating the ARIMA equation at time ``t``.
 
-        Builds the following Pyomo components on ``unit``:
+        Per the :class:`~flexops.surrogates.base.Surrogate` contract, this
+        does **not** itself enforce ``target[t] == body(t)`` —
+        :meth:`~flexops.core.ops_block.OpsBlockData.swap_relation` is the
+        sole place that constraint is built. This method only attaches the
+        auxiliary data ``body`` needs, as Params on ``unit``:
 
-        * ``"{target_name}_arima_eq"`` – time-indexed ``Constraint``.
-        * ``"{target_name}_arima_const"`` – ``Param`` for the constant term.
-        * ``"{target_name}_arima_ar{j}"`` – one ``Param`` per AR coefficient.
-        * ``"{target_name}_arima_ma{j}"`` – one ``Param`` per MA coefficient.
-        * ``"{target_name}_arima_exog{j}"`` – one ``Param`` per exog coef.
-        * ``"{target_name}_arima_resid{t}"`` – one ``Param`` per fitted
+        * ``"{target_name}_arima{_vN}_const"`` – ``Param`` for the constant term.
+        * ``"{target_name}_arima{_vN}_ar{j}"`` – one ``Param`` per AR coefficient.
+        * ``"{target_name}_arima{_vN}_ma{j}"`` – one ``Param`` per MA coefficient.
+        * ``"{target_name}_arima{_vN}_exog{j}"`` – one ``Param`` per exog coef.
+        * ``"{target_name}_arima{_vN}_resid{t}"`` – one ``Param`` per fitted
           residual (length ``n``, the number of in-sample rows).
-        * ``"{target_name}_arima_y0{j}"`` – one ``Param`` per initial
+        * ``"{target_name}_arima{_vN}_y0{j}"`` – one ``Param`` per initial
           ``y`` value (length ``p``, the AR order).
 
-        The constraint is built for every time index ``t``.  For ``t < p``
-        the AR lag terms fall back to the ``y0`` Params; the MA terms use
-        zero for negative residual indices.  No ``Constraint.Skip`` is
-        returned: the equation is well-defined for every ``t`` once the
-        ``init_values`` are supplied.
+        ``{_vN}`` is empty on the first call for a given ``target`` and
+        ``_v2``, ``_v3``, ... on every subsequent call (e.g. a re-fit that
+        is swapped in again) so each call's Params get fresh, non-colliding
+        names rather than silently reusing — or crashing on — an earlier
+        call's components.
+
+        ``body(t)`` is well-defined for every time index ``t``: for
+        ``t < p`` the AR lag terms fall back to the ``y0`` Params; the MA
+        terms use zero for negative residual indices. It never returns
+        ``pyomo.environ.Constraint.Skip``.
 
         Args:
             unit: The :class:`~flexops.core.ops_block.OpsBlockData` the
@@ -309,6 +328,16 @@ class ArimaSurrogate(Surrogate):
         Returns:
             A callable ``body(t)`` returning a Pyomo expression for time
             index ``t``.
+
+        Raises:
+            FlexConfigError: If the model's ``TimeBlock`` time step does not
+                match the training time step, if the model starts before or
+                too far beyond the training window, or if ``order[1]`` (the
+                differencing order ``d``) is greater than 0 and the model
+                starts exactly at (or before) the training data's first row
+                — ``d>0`` needs a known value immediately before the
+                model's start, which only exists once the model starts
+                strictly after the training start.
         """
         output_units = parse_units(next(iter(self.output_variables.values())))
 
@@ -321,16 +350,15 @@ class ArimaSurrogate(Surrogate):
         }
 
         order = self.data["order"]
-        p, _d, q = order
+        p, d, q = order
         const = float(self.data["const"])
         ar_coefs = [float(v) for v in self.data["ar_coefs"]]
         ma_coefs = [float(v) for v in self.data["ma_coefs"]]
         exog_coefs = [float(v) for v in self.data["exog_coefs"]]
         exog_names: list[str] = list(self.data["exogenous_variables"])
-        init_values = [float(v) for v in self.data.get("init_values", [0.0] * p)]
 
         # Fitted residuals from the direct-fit model (length n_train).
-        residuals: list[float] = self.data.get("_residuals", [0.0] * len(init_values))
+        residuals: list[float] = self.data.get("_residuals", [0.0] * p)
         n_resid = len(residuals)
 
         # Training metadata for time-alignment.
@@ -375,14 +403,37 @@ class ArimaSurrogate(Surrogate):
                 value=training_start_str,
             )
 
-        time_index = target.index_set()
+        if d == 0:
+            init_values = [float(v) for v in self.data.get("init_values", [0.0] * p)]
+        else:
+            if offset == 0:
+                raise FlexConfigError(
+                    f"ARIMA surrogate with d={d}>0 requires the model to start "
+                    f"strictly after the training data's first row, so that the "
+                    f"value immediately before the model's start "
+                    f"(training index -1) is known. The model starts exactly at "
+                    f"the training start ({training_start.isoformat()}); start "
+                    f"it at least one time step later, or re-fit with training "
+                    f"data that begins earlier.",
+                    field="training_start_date",
+                    value=training_start_str,
+                )
+            init_values = [float(training_y_values[offset - 1])]
 
+        # Each `build()` call gets a component-name prefix unique to `unit`,
+        # so a re-fit-and-reswap of the same target never collides with (H1)
+        # or silently reuses the stale values of (H2) an earlier swap's
+        # Params. The first call keeps the plain "{target}_arima" prefix
+        # (matching prior behaviour / existing component-name expectations);
+        # only a second (or later) call on the same target gets "_v2", "_v3", ...
         _prefix = f"{target.local_name}_arima"
+        _suffix_n = 1
+        while unit.find_component(f"{_prefix}_const") is not None:
+            _suffix_n += 1
+            _prefix = f"{target.local_name}_arima_v{_suffix_n}"
 
         def _add_param(name_suffix: str, value: float, units=None) -> Param:
             full_name = f"{_prefix}_{name_suffix}"
-            if unit.find_component(full_name) is not None:
-                return unit.find_component(full_name)
             p_obj = Param(
                 initialize=value,
                 mutable=True,
@@ -399,7 +450,12 @@ class ArimaSurrogate(Surrogate):
             _add_param(f"exog{j}", exog_coefs[j]) for j in range(len(exog_names))
         ]
         y0_params = [
-            _add_param(f"y0{j}", init_values[j], units=output_units) for j in range(p)
+            _add_param(
+                f"y0{j}",
+                init_values[j] if j < len(init_values) else init_values[-1],
+                units=output_units,
+            )
+            for j in range(max(p, d))
         ]
         resid_params = [
             _add_param(f"resid{t}", float(residuals[t]), units=output_units)
@@ -414,16 +470,18 @@ class ArimaSurrogate(Surrogate):
         def _y_lag(t_idx: int, lag: int):
             """Return ``y[t - lag]`` from training data or model target.
 
-            The training data starts at ``offset`` steps before the model's
-            t=0.  For lags that land inside the model window we return the
-            model's own ``target`` Var (which is fixed to observed values
-            for in-sample steps and computed for forecast steps).  For
-            lags that land in the training period before the model window
-            we return the stored training value as a float.
+            For d=0, returns the level. For d=1, returns the first difference
+            ``y[t-lag] - y[t-lag-1]``. Always carries ``output_units`` (even
+            when reading a raw training-data float), so every caller can
+            divide the result by ``output_units`` to get a consistent,
+            dimensionless number regardless of which branch fired.
             """
             training_idx = offset + t_idx - lag
             if training_idx < 0:
                 if offset == 0:
+                    # d>0 with offset==0 is rejected earlier in build() (a
+                    # d>0 model needs a known value immediately before the
+                    # model's start), so d==0 is guaranteed here.
                     return y0_params[p - lag + t_idx]
                 raise FlexConfigError(
                     f"ARIMA AR lag {lag} at model time {t_idx} maps to "
@@ -434,15 +492,47 @@ class ArimaSurrogate(Surrogate):
                     value=training_start_str,
                 )
             if training_idx >= offset:
-                return target[t_idx - lag]
-            return float(training_y_values[training_idx])
+                if d == 0:
+                    return target[t_idx - lag]
+                else:
+                    # d=1: return difference y[t-lag] - y[t-lag-1]
+                    prev_idx = t_idx - lag - 1
+                    if prev_idx < 0:
+                        # Need value from training data before model start
+                        prev_training_idx = offset + prev_idx
+                        if prev_training_idx < 0:
+                            raise FlexConfigError(
+                                f"ARIMA d=1 AR lag {lag} at model time "
+                                f"{t_idx} requires training index "
+                                f"{prev_training_idx}, before training start.",
+                                field="training_start_date",
+                                value=training_start_str,
+                            )
+                        return target[t_idx - lag] - (
+                            float(training_y_values[prev_training_idx]) * output_units
+                        )
+                    return target[t_idx - lag] - target[prev_idx]
+            if d == 0:
+                return float(training_y_values[training_idx]) * output_units
+            else:
+                # d=1: return difference from training data
+                if training_idx == 0:
+                    return float(training_y_values[0]) * output_units
+                return (
+                    float(training_y_values[training_idx])
+                    - float(training_y_values[training_idx - 1])
+                ) * output_units
 
         def _resid_lag(t_idx: int, lag: int):
-            """Return the fitted residual at training time ``t - lag``."""
+            """Return the fitted residual at training time ``t - lag``.
+
+            Always carries ``output_units`` (even the zero fallback), for
+            the same reason as :func:`_y_lag`.
+            """
             training_idx = offset + t_idx - lag
             if 0 <= training_idx < n_resid:
                 return resid_params[training_idx]
-            return 0.0
+            return 0.0 * output_units
 
         def body(t):
             ar_sum = sum(
@@ -456,20 +546,18 @@ class ArimaSurrogate(Surrogate):
                 * (pyunits.convert(exog_vars[k][t], exog_units[k]) / exog_units[k])
                 for k in range(len(exog_names))
             )
-            return (
-                const_param / output_units + ar_sum + ma_sum + exog_sum
-            ) * output_units
+            if d == 0:
+                return (
+                    const_param / output_units + ar_sum + ma_sum + exog_sum
+                ) * output_units
+            else:
+                # d=1: y[t] = y[t-1] + c + AR(differences) + MA + exog
+                if int(t) == 0:
+                    prev_y = y0_params[0] / output_units
+                else:
+                    prev_y = target[t - 1] / output_units
+                return (
+                    prev_y + const_param / output_units + ar_sum + ma_sum + exog_sum
+                ) * output_units
 
-        constraint_name = f"{_prefix}_eq"
-        unit.add_component(
-            constraint_name,
-            Constraint(
-                time_index,
-                rule=lambda b, t_idx: target[t_idx] == body(t_idx),
-                doc=(
-                    f"ARIMA({order[0]},{order[1]},{order[2]}) surrogate: "
-                    f"{target.local_name}[t] = c + AR + MA + exog."
-                ),
-            ),
-        )
         return body

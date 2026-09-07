@@ -409,9 +409,12 @@ def test_biogas_surrogate_spec_has_all_keys():
 
 @pytest.mark.unit
 def test_d_greater_than_zero_raises():
-    """ARIMA order with d>0 raises FlexConfigError."""
-    with pytest.raises(FlexConfigError, match="d=0"):
-        ArimaRegressor(order=(1, 1, 0))
+    """ARIMA order with d>1 raises FlexConfigError; d=1 is allowed."""
+    with pytest.raises(FlexConfigError, match="d=0 or d=1"):
+        ArimaRegressor(order=(1, 2, 0))
+    # d=1 should NOT raise during construction
+    regressor = ArimaRegressor(order=(1, 1, 0))
+    assert regressor._order == (1, 1, 0)
 
 
 @pytest.mark.unit
@@ -419,6 +422,55 @@ def test_D_greater_than_zero_raises():
     """Seasonal order with D>0 raises FlexConfigError."""
     with pytest.raises(FlexConfigError, match="D=0"):
         ArimaRegressor(order=(1, 0, 0), seasonal_order=(0, 1, 0, 24))
+
+
+@pytest.mark.unit
+def test_seasonal_P_or_Q_greater_than_zero_raises():
+    """Seasonal AR/MA terms (P>0 or Q>0) raise FlexConfigError at construction.
+
+    The direct-fit backend does not support seasonal AR/MA terms at all;
+    this must fail fast (at __init__), not deep inside fit() with a
+    NotImplementedError.
+    """
+    with pytest.raises(FlexConfigError, match="seasonal"):
+        ArimaRegressor(order=(1, 0, 0), seasonal_order=(1, 0, 0, 24))
+    with pytest.raises(FlexConfigError, match="seasonal"):
+        ArimaRegressor(order=(1, 0, 0), seasonal_order=(0, 0, 1, 24))
+    # The trivial (0, 0, 0, m) seasonal order is accepted (a no-op).
+    regressor = ArimaRegressor(order=(1, 0, 0), seasonal_order=(0, 0, 0, 24))
+    assert regressor._seasonal_order == (0, 0, 0, 24)
+
+
+@pytest.mark.unit
+def test_auto_arima_seasonal_search_with_nonzero_PQ_raises(monkeypatch):
+    """auto=True with a seasonal search that selects P>0/Q>0 raises
+    FlexConfigError (not a bare NotImplementedError) rather than crashing
+    deep inside the direct-fit backend.
+
+    ``_auto_select_order`` is monkeypatched to deterministically return a
+    seasonal order with P>0, since AutoARIMA's own seasonal search is a
+    heuristic that cannot be relied on to pick one on demand.
+    """
+    pytest.importorskip("scipy")
+
+    import flexparameterize.regression.arima as arima_module
+
+    monkeypatch.setattr(
+        arima_module,
+        "_auto_select_order",
+        lambda *a, **k: ((1, 0, 0), (1, 0, 0, 24)),
+    )
+
+    rng = np.random.default_rng(3)
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    y = pd.DataFrame({"y": rng.normal(size=n)}, index=idx)
+
+    regressor = ArimaRegressor(
+        auto=True, seasonal_order=(0, 0, 0, 24), max_ar_persistence=None
+    )
+    with pytest.raises(FlexConfigError, match="seasonal"):
+        regressor.fit(pd.DataFrame(index=idx), y)
 
 
 @pytest.mark.unit
@@ -494,3 +546,195 @@ def test_arima_in_registry():
 
     assert get_regressor(SurrogateType.ARIMA) is ArimaRegressor
     assert get_regressor("arima") is ArimaRegressor
+
+
+@pytest.mark.unit
+def test_fits_arima_d1_no_exog():
+    """ARIMA(1,1,0) with no exogenous regressors fits and predicts."""
+    pytest.importorskip("scipy")
+
+    rng = np.random.default_rng(0)
+    n = 200
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    phi = 0.6
+    y_values = np.zeros(n)
+    for t in range(1, n):
+        y_values[t] = (
+            y_values[t - 1]
+            + phi * (y_values[t - 1] - y_values[t - 2])
+            + rng.normal(0, 0.05)
+        )
+
+    y = pd.DataFrame({"y": y_values}, index=idx)
+
+    regressor = ArimaRegressor(order=(1, 1, 0), max_ar_persistence=None).fit(
+        pd.DataFrame(index=idx), y
+    )
+    assert regressor._fitted is True
+    assert regressor._order == (1, 1, 0)
+    assert regressor.model.model.k_diff == 1
+
+    # predict should return original-scale values
+    fcst = regressor.model.predict(steps=10)
+    assert len(fcst) == 10
+    assert not np.any(np.isnan(fcst))
+
+    # In-sample dynamic prediction should match observed scale
+    sm_insample = regressor.model.predict(
+        steps=20,
+        start=n - 20,
+        dynamic=True,
+    )
+    assert len(sm_insample) == 20
+    assert not np.any(np.isnan(sm_insample))
+
+
+# -- include_mean=False predict correctness (H3) ------------------------------
+
+
+@pytest.mark.unit
+def test_predict_with_include_mean_false_no_exog():
+    """`.model.predict()` does not crash and matches a hand-computed
+    no-constant forecast when the model was fit with include_mean=False.
+
+    Previously `predict()` hardcoded `has_const=True` regardless of how the
+    model was actually fit, which crashed with a negative-array-size
+    ValueError whenever include_mean=False and there were no MA/exog terms
+    to absorb the resulting off-by-one parameter misread.
+    """
+    pytest.importorskip("scipy")
+
+    rng = np.random.default_rng(0)
+    n = 100
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    phi = 0.5
+    y_values = np.zeros(n)
+    for t in range(1, n):
+        y_values[t] = phi * y_values[t - 1] + rng.normal(0, 0.01)
+    y = pd.DataFrame({"y": y_values}, index=idx)
+
+    regressor = ArimaRegressor(
+        order=(1, 0, 0), include_mean=False, max_ar_persistence=None
+    ).fit(pd.DataFrame(index=idx), y)
+    assert "const" not in regressor.coefficients
+
+    fcst = regressor.model.predict(steps=3)
+    assert len(fcst) == 3
+    assert not np.any(np.isnan(fcst))
+
+    ar1 = regressor.coefficients["ar1"]
+    manual = []
+    prev = float(y_values[-1])
+    for _ in range(3):
+        prev = ar1 * prev
+        manual.append(prev)
+    assert list(fcst) == pytest.approx(manual, rel=1e-6)
+
+
+@pytest.mark.unit
+def test_predict_with_include_mean_false_and_exog():
+    """include_mean=False with exogenous regressors also predicts correctly."""
+    pytest.importorskip("scipy")
+
+    rng = np.random.default_rng(1)
+    n = 150
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    feed = pd.Series(rng.uniform(0.1, 1.0, size=n), index=idx, name="feed")
+    phi = 0.4
+    y_values = np.zeros(n)
+    for t in range(1, n):
+        y_values[t] = phi * y_values[t - 1] + 2.0 * feed.iloc[t] + rng.normal(0, 0.01)
+    y = pd.DataFrame({"y": y_values}, index=idx)
+
+    regressor = ArimaRegressor(
+        order=(1, 0, 0), include_mean=False, max_ar_persistence=None
+    ).fit(pd.DataFrame({"feed": feed}), y)
+    assert "const" not in regressor.coefficients
+
+    exog_future = np.array([[0.5], [0.6], [0.7]])
+    fcst = regressor.model.predict(steps=3, exog=exog_future)
+    assert len(fcst) == 3
+    assert not np.any(np.isnan(fcst))
+
+    ar1 = regressor.coefficients["ar1"]
+    beta = regressor.coefficients["feed"]
+    manual = []
+    prev = float(y_values[-1])
+    for i in range(3):
+        prev = ar1 * prev + beta * exog_future[i, 0]
+        manual.append(prev)
+    assert list(fcst) == pytest.approx(manual, rel=1e-6)
+
+
+# -- row-sufficiency validation (H4) ------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "order,n_rows",
+    [
+        ((4, 0, 0), 5),  # AR(4)+const needs far more than 1 usable row
+        ((0, 0, 3), 3),  # MA(3)+const needs far more than 0 usable rows
+        ((2, 1, 2), 4),  # mixed AR/MA with differencing
+    ],
+)
+def test_underdetermined_order_raises_flex_data_error(order, n_rows):
+    """Fitting an order with too few rows raises FlexDataError instead of
+    silently returning a rank-deficient, meaningless `lstsq` solution.
+    """
+    pytest.importorskip("scipy")
+
+    rng = np.random.default_rng(0)
+    idx = pd.date_range("2024-01-01", periods=n_rows, freq="1h")
+    y = pd.DataFrame({"y": rng.normal(size=n_rows)}, index=idx)
+
+    with pytest.raises(FlexDataError, match="needs at least"):
+        ArimaRegressor(order=order, max_ar_persistence=None).fit(
+            pd.DataFrame(index=idx), y
+        )
+
+
+@pytest.mark.unit
+def test_sufficiently_sized_order_still_fits():
+    """The tightened row-sufficiency check does not false-positive on a
+    comfortably-sized fit."""
+    pytest.importorskip("scipy")
+
+    rng = np.random.default_rng(0)
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    y_values = np.zeros(n)
+    for t in range(1, n):
+        y_values[t] = 0.5 * y_values[t - 1] + rng.normal(0, 0.05)
+    y = pd.DataFrame({"y": y_values}, index=idx)
+
+    regressor = ArimaRegressor(order=(1, 0, 0), max_ar_persistence=None).fit(
+        pd.DataFrame(index=idx), y
+    )
+    assert regressor._fitted is True
+
+
+# -- predict(dynamic=False) (M4) -----------------------------------------------
+
+
+@pytest.mark.unit
+def test_predict_dynamic_false_raises():
+    """dynamic=False is documented as unsupported and must raise loudly,
+    not silently fall back to dynamic=True's behaviour (the parameter was
+    previously read from the signature but never actually used).
+    """
+    pytest.importorskip("scipy")
+
+    rng = np.random.default_rng(0)
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    y_values = np.zeros(n)
+    for t in range(1, n):
+        y_values[t] = 0.5 * y_values[t - 1] + rng.normal(0, 0.05)
+    y = pd.DataFrame({"y": y_values}, index=idx)
+
+    regressor = ArimaRegressor(order=(1, 0, 0), max_ar_persistence=None).fit(
+        pd.DataFrame(index=idx), y
+    )
+    with pytest.raises(FlexConfigError, match="dynamic"):
+        regressor.model.predict(steps=3, dynamic=False)
