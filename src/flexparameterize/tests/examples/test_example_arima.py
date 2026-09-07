@@ -158,7 +158,6 @@ def test_arima_example_end_to_end_arima_1_0_0():
     n_total = n_insample + n_fcst + n_opt
 
     train_end_idx = train_df.index[-1]
-    insample_data = train_df.iloc[-n_insample:]
     forecast_exog = X_valid
     forecast_obs = y_valid[_TARGET_COL]
 
