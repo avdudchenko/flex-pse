@@ -65,6 +65,13 @@ constant term, read in the declared output units.
    :nosignatures:
 
    MultilinearSurrogate
+
+.. currentmodule:: flexops.surrogates.arima
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
    ArimaSurrogate
 
 Not yet implemented

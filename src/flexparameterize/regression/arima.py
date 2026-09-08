@@ -93,7 +93,7 @@ class ArimaRegressor:
     value greater than ``max_ar_persistence`` (default 0.85) raise
     ``FlexConfigError``.  This is not a fitting-artefact guard: the Pyomo
     surrogate implements the mean ARIMA equation as a difference equation,
-    and coefficients near the unit root (|ar| ≳ 1) make the resulting
+    and coefficients near the unit root (\\|ar\\| ≳ 1) make the resulting
     optimisation problem numerically unstable regardless of the backend
     used to estimate them.  Set ``max_ar_persistence=None`` to disable.
 
@@ -110,7 +110,7 @@ class ArimaRegressor:
         include_drift: Whether to include a drift term (linear trend in the
             differenced series). Default ``False``.  Note: drift requires
             ``d > 0``, so it is incompatible with this regressor.
-        auto: If ``True``, run :class:`statsforecast.models.AutoARIMA` to
+        auto: If ``True``, run ``statsforecast.models.AutoARIMA`` to
             discover the best ``(p, d, q)`` and ``(P, D, Q, m)``, then
             refit that order with the direct scipy backend for Pyomo
             compatibility.  AutoARIMA is restricted to ``d=0`` and ``D=0``.
@@ -122,7 +122,7 @@ class ArimaRegressor:
             coefficient.  Default ``0.85``.  Set to ``None`` to disable
             this check.
         stationary: If ``True``, force ``stationary=True`` in
-            :class:`statsforecast.models.AutoARIMA`, which restricts the
+            ``statsforecast.models.AutoARIMA``, which restricts the
             search to models with stationary AR coefficients.  Default
             ``False``.  This is an additional safety net for the Pyomo
             surrogate; it does not replace the ``max_ar_persistence`` check.
