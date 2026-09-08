@@ -76,6 +76,14 @@ Protocol, and reduces its fit to a shared
 
    LinearRegressor
 
+.. currentmodule:: flexparameterize.regression.arima
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   ArimaRegressor
+
 .. currentmodule:: flexparameterize.regression
 
 .. autofunction:: get_regressor
@@ -84,9 +92,9 @@ Examples
 --------
 
 ``src/flexparameterize/examples/example_arima.py`` demonstrates the full
-ARIMAX surrogate path: fit an :class:`ArimaRegressor` on hourly biogas data,
-build an :class:`~flexops.surrogates.ArimaSurrogate` inside a Pyomo
-``OpsBlock``, and optimize a feed-volume control to maximize biogas output.
+ARIMAX surrogate path: fit an ``ArimaRegressor`` on hourly biogas data,
+build an ``ArimaSurrogate`` inside a Pyomo ``OpsBlock``, and optimize a
+feed-volume control to maximize biogas output.
 See :doc:`../../how_to/parameterize_from_data` for a walkthrough.
 
 Applying a fit to a live model
