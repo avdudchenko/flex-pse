@@ -145,6 +145,86 @@ def test_validate_rejects_exog_not_in_inputs():
 
 
 @pytest.mark.unit
+def test_validate_rejects_input_variables_not_dict():
+    data = _minimal_arima_data()
+    data["input_variables"] = ["feed_volume_kg", "TS_pct"]
+    with pytest.raises(FlexConfigError, match="input_variables"):
+        ArimaSurrogate(data)
+
+
+@pytest.mark.unit
+def test_validate_rejects_output_variables_not_single_entry():
+    data = _minimal_arima_data()
+    data["output_variables"] = {"a": "u1", "b": "u2"}
+    with pytest.raises(FlexConfigError, match="output_variables"):
+        ArimaSurrogate(data)
+
+
+@pytest.mark.unit
+def test_validate_rejects_exogenous_variables_not_list():
+    data = _minimal_arima_data()
+    data["exogenous_variables"] = "feed_volume_kg"
+    with pytest.raises(FlexConfigError, match="exogenous_variables"):
+        ArimaSurrogate(data)
+
+
+@pytest.mark.unit
+def test_validate_rejects_order_not_three_ints():
+    data = _minimal_arima_data()
+    data["order"] = [1, 0]
+    with pytest.raises(FlexConfigError, match="order"):
+        ArimaSurrogate(data)
+
+
+@pytest.mark.unit
+def test_validate_rejects_seasonal_order_not_four_ints():
+    data = _minimal_arima_data()
+    data["seasonal_order"] = [1, 0, 0]
+    with pytest.raises(FlexConfigError, match="seasonal_order"):
+        ArimaSurrogate(data)
+
+
+@pytest.mark.unit
+def test_validate_rejects_wrong_ma_coefs_length():
+    data = _minimal_arima_data(q=2)
+    data["ma_coefs"] = [0.2]  # should be 2
+    with pytest.raises(FlexConfigError, match="ma_coefs"):
+        ArimaSurrogate(data)
+
+
+@pytest.mark.unit
+def test_validate_rejects_wrong_exog_coefs_length():
+    data = _minimal_arima_data(n_exog=2)
+    data["exog_coefs"] = [2.0]  # should be 2
+    with pytest.raises(FlexConfigError, match="exog_coefs"):
+        ArimaSurrogate(data)
+
+
+@pytest.mark.unit
+def test_validate_rejects_non_numeric_coefficient():
+    data = _minimal_arima_data()
+    data["ar_coefs"] = ["bad"]
+    with pytest.raises(FlexConfigError, match="ar_coefs"):
+        ArimaSurrogate(data)
+
+
+@pytest.mark.unit
+def test_validate_rejects_wrong_init_values_length():
+    data = _minimal_arima_data(p=2)
+    data["init_values"] = [0.0]  # should be 2
+    with pytest.raises(FlexConfigError, match="init_values"):
+        ArimaSurrogate(data)
+
+
+@pytest.mark.unit
+def test_validate_rejects_empty_units_string():
+    data = _minimal_arima_data()
+    data["input_variables"]["feed_volume_kg"] = ""
+    with pytest.raises(FlexConfigError, match="input_variables"):
+        ArimaSurrogate(data)
+
+
+@pytest.mark.unit
 def test_validate_accepts_seasonal_order():
     data = _minimal_arima_data(p=1, q=1)
     data["seasonal_order"] = [1, 0, 0, 24]
@@ -237,6 +317,41 @@ def test_build_d1_offset_zero_raises():
     data["init_values"] = [0.0]
     surrogate = ArimaSurrogate(data)
     with pytest.raises(FlexConfigError, match="d=1"):
+        surrogate.build(unit, unit.biogas_m3_hour)
+
+
+@pytest.mark.unit
+def test_build_time_step_mismatch_raises():
+    """build() raises if the model TimeBlock time step differs from training."""
+    m, unit = _make_unit(n_points=5)
+    data = _minimal_arima_data(p=1, q=0, n_exog=0, n_resid=5)
+    data["training_time_step_seconds"] = 1800.0  # 30 min, but TimeBlock is 15 min
+    surrogate = ArimaSurrogate(data)
+    with pytest.raises(FlexConfigError, match="time step"):
+        surrogate.build(unit, unit.biogas_m3_hour)
+
+
+@pytest.mark.unit
+def test_build_model_starts_before_training_raises():
+    """build() raises if the model starts before the training data start."""
+    m, unit = _make_unit(n_points=5)
+    data = _minimal_arima_data(p=1, q=0, n_exog=0, n_resid=5)
+    data["training_start_date"] = "2025-01-02T00:00:00"  # model starts 2025-01-01
+    surrogate = ArimaSurrogate(data)
+    with pytest.raises(FlexConfigError, match="before the training data start"):
+        surrogate.build(unit, unit.biogas_m3_hour)
+
+
+@pytest.mark.unit
+def test_build_model_starts_beyond_training_raises():
+    """build() raises if the model starts after the training data ends."""
+    m, unit = _make_unit(n_points=5)
+    data = _minimal_arima_data(p=1, q=0, n_exog=0, n_resid=5)
+    data["training_start_date"] = "2024-12-31T00:00:00"  # model starts 2025-01-01
+    data["training_y_values"] = [0.0] * 1  # only 1 training point
+    data["_residuals"] = [0.0]
+    surrogate = ArimaSurrogate(data)
+    with pytest.raises(FlexConfigError, match="beyond the training data length"):
         surrogate.build(unit, unit.biogas_m3_hour)
 
 

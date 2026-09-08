@@ -58,7 +58,6 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -66,9 +65,6 @@ import pandas as pd
 from flexcore.config.schema import SurrogateSpec, SurrogateType
 from flexcore.exceptions import FlexConfigError, FlexDataError
 from flexparameterize.regression.base import FitResult
-
-if TYPE_CHECKING:
-    import matplotlib.axes
 
 
 class ArimaRegressor:
@@ -669,67 +665,6 @@ class ArimaRegressor:
             "sigma2": sigma2,
             "rmse": rmse,
         }
-
-    def plot_fit(
-        self,
-        X: pd.DataFrame | None = None,
-        y: pd.DataFrame | None = None,
-        *,
-        figsize: tuple[int, int] = (12, 8),
-        fitted: pd.Series | None = None,
-    ) -> matplotlib.axes.Axes:
-        """Plot observed vs. fitted values and residuals.
-
-        Args:
-            X: Exogenous columns (same as passed to :meth:`fit`). Ignored
-                when ``fitted`` is supplied.
-            y: Output column (same as passed to :meth:`fit`). Ignored when
-                ``fitted`` is supplied.
-            figsize: Figure size ``(width, height)`` in inches.
-            fitted: Pre-computed fitted values; used in preference to
-                ``X``/``y`` when supplied.
-
-        Returns:
-            The ``matplotlib`` ``Axes`` of the top subplot so callers can
-            further customise the figure.
-
-        Raises:
-            FlexConfigError: If matplotlib is not installed.
-            FlexDataError: If neither ``fitted`` nor both ``X``/``y`` are
-                supplied.
-        """
-        _import_matplotlib()
-        import matplotlib.pyplot as plt
-
-        if fitted is None:
-            if y is None:
-                raise FlexDataError(
-                    "plot_fit requires `y` (or `fitted`) to plot the fit."
-                )
-            output = _single_column(y, "y")
-            fitted_series = pd.Series(self.model.fittedvalues, index=output.index)
-            fitted = fitted_series
-
-        residuals = fitted - _single_column(y or X, "y" if y is not None else "X")
-
-        fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
-
-        fitted.plot(ax=axes[0], label="fitted", color="steelblue")
-        if y is not None:
-            _single_column(y, "y").plot(
-                ax=axes[0], label="observed", color="gray", alpha=0.7
-            )
-        axes[0].set_title("ARIMA: observed vs. fitted")
-        axes[0].set_ylabel(self.output_variable)
-        axes[0].legend()
-
-        residuals.plot(ax=axes[1], color="darkorange")
-        axes[1].axhline(0, color="black", linewidth=0.8)
-        axes[1].set_title("Residuals")
-        axes[1].set_ylabel("Residual")
-
-        fig.tight_layout()
-        return axes[0]
 
 
 # -- helpers -------------------------------------------------------------------

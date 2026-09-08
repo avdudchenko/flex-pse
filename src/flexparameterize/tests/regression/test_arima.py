@@ -738,3 +738,43 @@ def test_predict_dynamic_false_raises():
     )
     with pytest.raises(FlexConfigError, match="dynamic"):
         regressor.model.predict(steps=3, dynamic=False)
+
+
+# -- FlexConfigError paths that were not previously exercised ------------------
+
+
+@pytest.mark.unit
+def test_statsforecast_absent_raises(monkeypatch):
+    """With statsforecast unimportable, auto=True raises FlexConfigError."""
+    monkeypatch.setitem(sys.modules, "statsforecast", None)
+    monkeypatch.setitem(sys.modules, "statsforecast.models", None)
+
+    y = pd.DataFrame(
+        {"y": [1.0, 2.0, 3.0]}, index=pd.date_range("2024-01-01", periods=3, freq="1h")
+    )
+    with pytest.raises(FlexConfigError, match=r"flex-pse\[parameterize\]"):
+        ArimaRegressor(auto=True).fit(pd.DataFrame(index=y.index), y)
+
+
+@pytest.mark.unit
+def test_to_surrogate_spec_missing_input_units_raises():
+    """to_surrogate_spec without input_units for an exogenous column raises."""
+    pytest.importorskip("scipy")
+
+    rng = np.random.default_rng(0)
+    n = 80
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    feed = pd.Series(rng.uniform(0.1, 1.0, size=n), index=idx, name="feed")
+    vals = 2.0 * feed + rng.normal(0, 0.05, size=n)
+    y = pd.DataFrame({"biogas": vals}, index=idx)
+
+    regressor = ArimaRegressor(order=(0, 0, 0)).fit(pd.DataFrame({"feed": feed}), y)
+    with pytest.raises(FlexConfigError, match="input_units"):
+        regressor.to_surrogate_spec(input_units={}, output_units="m^3/hr")
+
+
+@pytest.mark.unit
+def test_max_ar_persistence_invalid_type_raises():
+    """max_ar_persistence given a non-numeric value raises FlexConfigError."""
+    with pytest.raises(FlexConfigError, match="max_ar_persistence"):
+        ArimaRegressor(order=(1, 0, 0), max_ar_persistence="high")
