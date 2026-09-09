@@ -95,10 +95,7 @@ regressor = LinearRegressor().fit(
     aliased[["power_electrical"]],
 )
 regressor.coefficients   # {"flow_out": ..., "outlet_state.pressure": ..., "intercept": ...}
-spec = regressor.to_surrogate_spec(
-    input_units={"flow_out": "m^3/hr", "outlet_state.pressure": "Pa"},
-    output_units="kW",
-)
+spec = regressor.to_surrogate_spec()
 ```
 
 `LinearRegressor` needs the `[parameterize]` extra's `scikit-learn`
@@ -273,10 +270,7 @@ problem.
 from flexparameterize.regression.arima import ArimaRegressor
 
 regressor = ArimaRegressor(order=(1, 0, 0), max_ar_persistence=None).fit(X_train, y_train)
-spec = regressor.to_surrogate_spec(
-    input_units={"feed_volume_kg": "kg", "TS_pct": "%"},
-    output_units="m^3/hr",
-)
+spec = regressor.to_surrogate_spec()
 ```
 
 `order=(p, d, q)` may use `d=0` or `d=1`; seasonal differencing and seasonal

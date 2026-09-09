@@ -80,7 +80,10 @@ def test_pyomo_matches_direct_fit_for_multiple_arima_orders():
 
         # Fit model using our own ArimaRegressor
         regressor = ArimaRegressor(order=order, max_ar_persistence=None).fit(
-            pd.DataFrame({"feed": feed}), y
+            pd.DataFrame({"feed": feed}),
+            y,
+            input_units={"feed": "dimensionless"},
+            output_units="m^3/hr",
         )
         assert regressor.fitted is True
 
@@ -144,10 +147,7 @@ def test_pyomo_matches_direct_fit_for_multiple_arima_orders():
             m.unit.biogas_m3_hour_relation, target=m.unit.biogas_m3_hour
         )
 
-        spec = regressor.to_surrogate_spec(
-            input_units={"feed": "dimensionless"},
-            output_units="m^3/hr",
-        )
+        spec = regressor.to_surrogate_spec()
         surrogate = ArimaSurrogate(spec.data)
         m.unit.swap_relation("biogas_m3_hour_relation", surrogate)
 
@@ -219,7 +219,10 @@ def test_reswapping_arima_relation_succeeds_and_uses_latest_coefficients():
             y_values[t] = const + phi * y_values[t - 1] + rng.normal(0, 0.01)
         y = pd.DataFrame({"y": y_values}, index=idx)
         return ArimaRegressor(order=(1, 0, 0), max_ar_persistence=None).fit(
-            pd.DataFrame(index=idx), y
+            pd.DataFrame(index=idx),
+            y,
+            input_units={},
+            output_units="m^3/hr",
         )
 
     regressor1 = _fit(phi=0.3, const=0.1, seed=1)
@@ -249,7 +252,7 @@ def test_reswapping_arima_relation_succeeds_and_uses_latest_coefficients():
     )
     m.unit.register_relation(m.unit.y_relation, target=m.unit.y)
 
-    spec1 = regressor1.to_surrogate_spec(input_units={}, output_units="m^3/hr")
+    spec1 = regressor1.to_surrogate_spec()
     m.unit.swap_relation("y_relation", ArimaSurrogate(spec1.data))
 
     fitted_1 = m.unit.find_component("y_relation_fitted")
@@ -257,7 +260,7 @@ def test_reswapping_arima_relation_succeeds_and_uses_latest_coefficients():
     assert fitted_1[0].active
 
     # Re-fit and reswap -- must not raise.
-    spec2 = regressor2.to_surrogate_spec(input_units={}, output_units="m^3/hr")
+    spec2 = regressor2.to_surrogate_spec()
     m.unit.swap_relation("y_relation", ArimaSurrogate(spec2.data))
 
     # The first swap's fitted constraint is deactivated, not deleted; the
@@ -321,13 +324,15 @@ def test_arima_roundtrip(order, auto, auto_kwargs):
 
     regressor = ArimaRegressor(
         order=order, auto=auto, max_ar_persistence=None, **auto_kwargs
-    ).fit(X, y)
-    assert regressor.fitted is True
-
-    spec = regressor.to_surrogate_spec(
+    ).fit(
+        X,
+        y,
         input_units={"feed": "dimensionless"},
         output_units="m^3/hr",
     )
+    assert regressor.fitted is True
+
+    spec = regressor.to_surrogate_spec()
 
     # Direct fit predictions for in-sample + forecast horizon
     insample_exog = X.iloc[-n_insample:].values
@@ -465,13 +470,15 @@ def test_arima_roundtrip_d1_at_offset_zero():
     feed = pd.Series(np.random.uniform(0.1, 1.0, size=n_train), index=idx, name="feed")
     X = pd.DataFrame({"feed": feed})
 
-    regressor = ArimaRegressor(order=(1, 1, 0), max_ar_persistence=None).fit(X, y)
-    assert regressor.fitted is True
-
-    spec = regressor.to_surrogate_spec(
+    regressor = ArimaRegressor(order=(1, 1, 0), max_ar_persistence=None).fit(
+        X,
+        y,
         input_units={"feed": "dimensionless"},
         output_units="m^3/hr",
     )
+    assert regressor.fitted is True
+
+    spec = regressor.to_surrogate_spec()
 
     # Direct fit predictions for the in-sample window starting at t=p+1
     # and the forecast window. predict(start=...) for d=1 requires start >= p+1.
@@ -625,14 +632,16 @@ def test_arima_roundtrip_d1_with_drift():
 
     regressor = ArimaRegressor(
         order=(1, 1, 0), include_drift=True, max_ar_persistence=None
-    ).fit(X, y)
-    assert regressor.fitted is True
-    assert "drift" in regressor.model_["coef"]
-
-    spec = regressor.to_surrogate_spec(
+    ).fit(
+        X,
+        y,
         input_units={"feed": "dimensionless"},
         output_units="m^3/hr",
     )
+    assert regressor.fitted is True
+    assert "drift" in regressor.model_["coef"]
+
+    spec = regressor.to_surrogate_spec()
     assert "drift" in spec.data
 
     # Direct fit predictions for in-sample + forecast horizon

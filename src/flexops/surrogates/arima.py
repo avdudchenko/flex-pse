@@ -149,7 +149,6 @@ class ArimaSurrogate(Surrogate):
                 value=outputs,
             )
 
-        exog = self.data["exogenous_variables"]
         if not isinstance(exog, list):
             raise FlexConfigError(
                 f"ARIMA surrogate 'exogenous_variables' must be a list "

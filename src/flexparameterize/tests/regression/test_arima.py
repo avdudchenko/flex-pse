@@ -49,7 +49,12 @@ def test_no_order_no_auto_raises():
     """Passing neither order nor auto=True raises FlexConfigError."""
     y = pd.DataFrame({"biogas_m3_hour": [1.0, 2.0, 3.0]})
     with pytest.raises(FlexConfigError, match="order"):
-        ArimaRegressor().fit(pd.DataFrame(index=y.index), y)
+        ArimaRegressor().fit(
+            pd.DataFrame(index=y.index),
+            y,
+            input_units={},
+            output_units="m^3/hr",
+        )
 
 
 # -- synthetic-data fitting tests --------------------------------------------
@@ -92,7 +97,10 @@ def test_fits_arima_with_exog():
     y = pd.DataFrame({"biogas": biogas}, index=idx)
 
     regressor = ArimaRegressor(order=(1, 0, 1), max_ar_persistence=None).fit(
-        pd.DataFrame({"feed": feed}), y
+        pd.DataFrame({"feed": feed}),
+        y,
+        input_units={"feed": "kg"},
+        output_units="m^3/hr",
     )
     assert regressor.exogenous_variables == ["feed"]
     assert "feed" in regressor.coefficients
@@ -113,7 +121,10 @@ def test_fits_multiple_exog_columns():
     y = pd.DataFrame({"output": y_vals}, index=idx)
 
     regressor = ArimaRegressor(order=(0, 0, 0)).fit(
-        pd.DataFrame({"x1": x1, "x2": x2}), y
+        pd.DataFrame({"x1": x1, "x2": x2}),
+        y,
+        input_units={"x1": "unit", "x2": "unit"},
+        output_units="unit",
     )
     assert sorted(regressor.exogenous_variables) == ["x1", "x2"]
     assert "x1" in regressor.coefficients
@@ -169,7 +180,7 @@ def test_provenance_populated():
     assert result.n_samples == n
     assert len(result.data_window) == 2
 
-    spec = regressor.to_surrogate_spec(input_units={}, output_units="m^3/hr")
+    spec = regressor.to_surrogate_spec()
     assert spec.surrogate_type == SurrogateType.ARIMA
     provenance = {"n_samples": result.n_samples, **result.metrics}
     json.dumps(provenance)
@@ -190,10 +201,13 @@ def test_surrogate_spec_data_contract():
     vals = 2.0 * feed + rng.normal(0, 0.05, size=n)
     y = pd.DataFrame({"biogas": vals}, index=idx)
 
-    regressor = ArimaRegressor(order=(0, 0, 0)).fit(pd.DataFrame({"feed": feed}), y)
-    spec = regressor.to_surrogate_spec(
-        input_units={"feed": "kg"}, output_units="m^3/hr"
+    regressor = ArimaRegressor(order=(0, 0, 0)).fit(
+        pd.DataFrame({"feed": feed}),
+        y,
+        input_units={"feed": "kg"},
+        output_units="m^3/hr",
     )
+    spec = regressor.to_surrogate_spec()
 
     data = spec.data
     assert set(data) == {
@@ -236,7 +250,7 @@ def test_surrogate_spec_seasonal_order_none_without_seasonal():
     regressor = ArimaRegressor(order=(1, 0, 0), max_ar_persistence=None).fit(
         pd.DataFrame(index=idx), y
     )
-    spec = regressor.to_surrogate_spec(input_units={}, output_units="unit")
+    spec = regressor.to_surrogate_spec()
     assert spec.data.get("seasonal_order") is None
 
 
@@ -256,7 +270,7 @@ def test_to_surrogate_spec_before_fit_raises():
     """to_surrogate_spec before fit raises FlexDataError."""
     regressor = ArimaRegressor(order=(1, 0, 0))
     with pytest.raises(FlexDataError, match="no fit yet"):
-        regressor.to_surrogate_spec(input_units={}, output_units="unit")
+        regressor.to_surrogate_spec()
 
 
 @pytest.mark.unit
@@ -271,10 +285,12 @@ def test_missing_input_units_raises():
     vals = 2.0 * feed.values + rng.normal(0, 0.05, size=n)
     y = pd.DataFrame({"biogas": vals}, index=idx)
 
-    regressor = ArimaRegressor(order=(0, 0, 0)).fit(pd.DataFrame({"feed": feed}), y)
     with pytest.raises(FlexConfigError, match="feed"):
-        regressor.to_surrogate_spec(
-            input_units={"other_col": "kg"}, output_units="m^3/hr"
+        ArimaRegressor(order=(0, 0, 0)).fit(
+            pd.DataFrame({"feed": feed}),
+            y,
+            input_units={},
+            output_units="m^3/hr",
         )
 
 
@@ -327,7 +343,7 @@ def test_auto_arima_selects_order():
 
     regressor = ArimaRegressor(
         auto=True, max_p=2, max_q=2, max_ar_persistence=None
-    ).fit(pd.DataFrame(index=idx), y)
+    ).fit(pd.DataFrame(index=idx), y, input_units={}, output_units="m^3/hr")
     assert regressor.order is not None
     assert len(regressor.order) == 3
     assert all(isinstance(v, int) for v in regressor.order)
@@ -350,7 +366,12 @@ def test_fits_biogas_with_feed_and_ts_exog():
     X = df[["feed_volume_kg", "TS_pct"]]
     y = df[["biogas_m3_hour"]]
 
-    regressor = ArimaRegressor(order=(1, 0, 1), max_ar_persistence=None).fit(X, y)
+    regressor = ArimaRegressor(order=(1, 0, 1), max_ar_persistence=None).fit(
+        X,
+        y,
+        input_units={"feed_volume_kg": "kg", "TS_pct": "%"},
+        output_units="m^3/hr",
+    )
 
     assert regressor.exogenous_variables == ["feed_volume_kg", "TS_pct"]
     assert regressor.output_variable == "biogas_m3_hour"
@@ -360,10 +381,7 @@ def test_fits_biogas_with_feed_and_ts_exog():
     assert np.isfinite(regressor.metrics["aic"])
     assert np.isfinite(regressor.metrics["rmse"])
 
-    spec = regressor.to_surrogate_spec(
-        input_units={"feed_volume_kg": "kg", "TS_pct": "%"},
-        output_units="m^3/hr",
-    )
+    spec = regressor.to_surrogate_spec()
     assert spec.surrogate_type == SurrogateType.ARIMA
     assert spec.data["exogenous_variables"] == ["feed_volume_kg", "TS_pct"]
     assert len(spec.data["exog_coefs"]) == 2
@@ -383,11 +401,13 @@ def test_biogas_surrogate_spec_has_all_keys():
     X = df[["feed_volume_kg", "TS_pct"]]
     y = df[["biogas_m3_hour"]]
 
-    regressor = ArimaRegressor(order=(2, 0, 1), max_ar_persistence=None).fit(X, y)
-    spec = regressor.to_surrogate_spec(
+    regressor = ArimaRegressor(order=(2, 0, 1), max_ar_persistence=None).fit(
+        X,
+        y,
         input_units={"feed_volume_kg": "kg", "TS_pct": "%"},
         output_units="m^3/hr",
     )
+    spec = regressor.to_surrogate_spec()
 
     data = spec.data
     assert "input_variables" in data
@@ -498,7 +518,7 @@ def test_include_drift_with_d1_fits_and_spec_includes_drift():
     assert regressor.fitted is True
     assert regressor.order[1] == 1
 
-    spec = regressor.to_surrogate_spec(input_units={}, output_units="unit")
+    spec = regressor.to_surrogate_spec()
     assert "drift" in spec.data
     assert isinstance(spec.data["drift"], float)
 
@@ -516,7 +536,7 @@ def test_auto_arima_d_in_zero_or_one():
 
     regressor = ArimaRegressor(
         auto=True, max_p=2, max_q=2, max_d=1, max_ar_persistence=None
-    ).fit(pd.DataFrame(index=idx), y)
+    ).fit(pd.DataFrame(index=idx), y, input_units={}, output_units="m^3/hr")
     assert regressor.order is not None
     assert regressor.order[1] in (0, 1)
 
@@ -696,7 +716,12 @@ def test_predict_with_include_mean_false_and_exog():
 
     regressor = ArimaRegressor(
         order=(1, 0, 0), include_mean=False, max_ar_persistence=None
-    ).fit(pd.DataFrame({"feed": feed}), y)
+    ).fit(
+        pd.DataFrame({"feed": feed}),
+        y,
+        input_units={"feed": "dimensionless"},
+        output_units="unit",
+    )
     assert "const" not in regressor.coefficients
 
     exog_future = np.array([[0.5], [0.6], [0.7]])
@@ -738,7 +763,10 @@ def test_underdetermined_order_raises_flex_data_error(order, n_rows):
 
     with pytest.raises(FlexDataError, match="needs at least"):
         ArimaRegressor(order=order, max_ar_persistence=None).fit(
-            pd.DataFrame(index=idx), y
+            pd.DataFrame(index=idx),
+            y,
+            input_units={},
+            output_units="m^3/hr",
         )
 
 
@@ -801,12 +829,17 @@ def test_statsforecast_absent_raises(monkeypatch):
         {"y": [1.0, 2.0, 3.0]}, index=pd.date_range("2024-01-01", periods=3, freq="1h")
     )
     with pytest.raises(FlexConfigError, match=r"flex-pse\[parameterize\]"):
-        ArimaRegressor(auto=True).fit(pd.DataFrame(index=y.index), y)
+        ArimaRegressor(auto=True).fit(
+            pd.DataFrame(index=y.index),
+            y,
+            input_units={},
+            output_units="m^3/hr",
+        )
 
 
 @pytest.mark.unit
 def test_to_surrogate_spec_missing_input_units_raises():
-    """to_surrogate_spec without input_units for an exogenous column raises."""
+    """fit() raises when input_units is missing an exogenous column."""
     pytest.importorskip("scipy")
 
     rng = np.random.default_rng(0)
@@ -816,9 +849,13 @@ def test_to_surrogate_spec_missing_input_units_raises():
     vals = 2.0 * feed + rng.normal(0, 0.05, size=n)
     y = pd.DataFrame({"biogas": vals}, index=idx)
 
-    regressor = ArimaRegressor(order=(0, 0, 0)).fit(pd.DataFrame({"feed": feed}), y)
     with pytest.raises(FlexConfigError, match="input_units"):
-        regressor.to_surrogate_spec(input_units={}, output_units="m^3/hr")
+        ArimaRegressor(order=(0, 0, 0)).fit(
+            pd.DataFrame({"feed": feed}),
+            y,
+            input_units={},
+            output_units="m^3/hr",
+        )
 
 
 @pytest.mark.unit

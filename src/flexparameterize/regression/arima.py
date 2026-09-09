@@ -31,16 +31,21 @@ Typical usage::
     X = df[["feed_volume_kg", "TS_pct"]]
     y = df[["biogas_m3_hour"]]
 
-    regressor = ArimaRegressor(order=(1, 0, 1)).fit(X, y)
-    result = regressor.to_fit_result()
-    spec  = regressor.to_surrogate_spec(
+    regressor = ArimaRegressor(order=(1, 0, 1)).fit(
+        X, y,
         input_units={"feed_volume_kg": "kg", "TS_pct": "%"},
         output_units="m^3/hr",
     )
+    result = regressor.to_fit_result()
+    spec  = regressor.to_surrogate_spec()
 
     # Or let statsforecast pick the best order (no differencing), then
     # refit the winning order with scipy for Pyomo compatibility:
-    auto_regressor = ArimaRegressor(auto=True, max_p=3, max_q=3).fit(X, y)
+    auto_regressor = ArimaRegressor(auto=True, max_p=3, max_q=3).fit(
+        X, y,
+        input_units={"feed_volume_kg": "kg", "TS_pct": "%"},
+        output_units="m^3/hr",
+    )
 
 Attributes:
     model: The fitted :class:`_DirectResults` (or ``None`` before
@@ -50,6 +55,9 @@ Attributes:
     data_window: ``(first, last)`` index value of the rows used.
     exogenous_variables: Column names of the fitted exogenous inputs.
     output_variable: Column name of the fitted output.
+    input_units: Units of every fitted exogenous column, keyed by column
+        name.  Set by :meth:`fit`.
+    output_units: Units of the fitted output column.  Set by :meth:`fit`.
     order: ``(p, d, q)`` order used (or ``None`` when ``auto`` was used).
     seasonal_order: ``(P, D, Q, m)`` seasonal order, or ``None``.
 """
@@ -210,9 +218,18 @@ class ArimaRegressor:
         self.data_window: tuple = ()
         self.exogenous_variables: list[str] = []
         self.output_variable: str = ""
+        self.input_units: dict[str, str] = {}
+        self.output_units: str = ""
         self._fitted: bool = False
 
-    def fit(self, X: pd.DataFrame, y: pd.DataFrame) -> ArimaRegressor:
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.DataFrame,
+        *,
+        input_units: dict[str, str] | None = None,
+        output_units: str | None = None,
+    ) -> ArimaRegressor:
         """Fit an ARIMA model to ``y`` with optional exogenous regressors ``X``.
 
         Uses ``scipy.optimize.least_squares`` to minimize the mean-equation
@@ -231,13 +248,20 @@ class ArimaRegressor:
                 ``DataFrame`` for a pure ARIMA fit.
             y: One output column (a one-column ``DataFrame`` or a
                 ``Series``).
+            input_units: Units of every fitted exogenous column, keyed by its
+                column name.  Defaults to ``{}``.  Recorded for
+                :meth:`to_surrogate_spec`.
+            output_units: Units of the fitted output column.  Defaults to
+                ``""``.  Recorded for :meth:`to_surrogate_spec`.
 
         Returns:
             ``self``, fitted.
 
         Raises:
-            FlexConfigError: If scipy is not installed, or ``auto``
-                is ``False`` and no ``order`` was supplied.
+            FlexConfigError: If scipy is not installed, ``auto``
+                is ``False`` and no ``order`` was supplied, or
+                ``input_units`` is missing an entry for one of ``X``'s
+                columns.
             FlexDataError: If ``y`` does not hold exactly one column, or
                 fewer than ``order[2] + 1`` rows survive dropping nulls.
         """
@@ -254,6 +278,23 @@ class ArimaRegressor:
                 "ArimaRegressor requires scipy. Install it with "
                 "`pip install 'flex-pse[parameterize]'`."
             ) from exc
+
+        if input_units is None:
+            input_units = {}
+        if output_units is None:
+            output_units = ""
+
+        missing = [name for name in X.columns if name not in input_units]
+        if missing:
+            raise FlexConfigError(
+                f"fit is missing input_units for {missing}; every input "
+                f"column ({list(X.columns)}) needs an entry.",
+                field="input_units",
+                value=missing,
+            )
+
+        self.input_units = dict(input_units)
+        self.output_units = output_units
 
         output = _single_column(y, "y")
         exogenous = _exog_columns(X)
@@ -512,13 +553,10 @@ class ArimaRegressor:
             data_window=self.data_window,
         )
 
-    def to_surrogate_spec(
-        self,
-        *,
-        input_units: dict[str, str],
-        output_units: str,
-    ) -> SurrogateSpec:
+    def to_surrogate_spec(self) -> SurrogateSpec:
         """Return the fit as a persistable ``arima`` ``SurrogateSpec``.
+
+        Uses the ``input_units``/``output_units`` recorded by :meth:`fit`.
 
         The ``data`` field of the returned spec matches the contract expected
         by :class:`~flexops.surrogates.arima.ArimaSurrogate`:
@@ -537,11 +575,6 @@ class ArimaRegressor:
         - ``drift``: the fitted drift coefficient (only present when
           ``include_drift=True`` and ``d=1``).
 
-        Args:
-            input_units: Units of every fitted exogenous column, keyed by its
-                column name.
-            output_units: Units of the fitted output column.
-
         Returns:
             A :class:`~flexcore.config.schema.SurrogateSpec` of type
             ``SurrogateType.ARIMA``.
@@ -557,7 +590,9 @@ class ArimaRegressor:
                 "to_surrogate_spec()."
             )
 
-        missing = [name for name in self.exogenous_variables if name not in input_units]
+        missing = [
+            name for name in self.exogenous_variables if name not in self.input_units
+        ]
         if missing:
             raise FlexConfigError(
                 f"to_surrogate_spec is missing input_units for {missing}; "
@@ -618,9 +653,9 @@ class ArimaRegressor:
             surrogate_type=SurrogateType.ARIMA,
             data={
                 "input_variables": {
-                    name: input_units[name] for name in self.exogenous_variables
+                    name: self.input_units[name] for name in self.exogenous_variables
                 },
-                "output_variables": {self.output_variable: output_units},
+                "output_variables": {self.output_variable: self.output_units},
                 "exogenous_variables": list(self.exogenous_variables),
                 "order": [int(p), int(d), int(q)],
                 "seasonal_order": seasonal_order,
