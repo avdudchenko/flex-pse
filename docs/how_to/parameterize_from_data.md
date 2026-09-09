@@ -267,11 +267,6 @@ embeds the mean equation directly inside the Pyomo model.  The result is a
 surrogate that can be differentiated and solved as part of an optimization
 problem.
 
-The full end-to-end example lives in
-`src/flexparameterize/examples/example_arima.py`.  It trains on hourly biogas
-data, validates against a held-out two-day window, and chooses a feed-volume
-control to maximize biogas while staying within observed bounds.
-
 ### Fit
 
 ```python
@@ -381,5 +376,3 @@ The example compares three horizons:
 | In-sample (last day of training) | Pyomo surrogate vs direct fit | RMSE ≈ 0 |
 | 2-day forecast | Pyomo surrogate vs direct fit | RMSE ≈ 0 |
 | 1-day optimization | Pyomo optimized mean vs observed target | close match |
-
-Figures are written to `src/flexparameterize/examples/figures/arima_*.png`.

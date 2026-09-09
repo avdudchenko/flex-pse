@@ -91,12 +91,6 @@ Protocol, and reduces its fit to a shared
 Examples
 --------
 
-``src/flexparameterize/examples/example_arima.py`` demonstrates the full
-ARIMAX surrogate path: fit an ``ArimaRegressor`` on hourly biogas data,
-build an ``ArimaSurrogate`` inside a Pyomo ``OpsBlock``, and optimize a
-feed-volume control to maximize biogas output.
-See :doc:`../../how_to/parameterize_from_data` for a walkthrough.
-
 Applying a fit to a live model
 ------------------------------
 
