@@ -306,18 +306,26 @@ def test_build_twice_on_same_target_does_not_collide_or_go_stale():
 
 
 @pytest.mark.unit
-def test_build_d1_offset_zero_raises():
-    """A d>0 surrogate whose model starts exactly at the training start has
-    no known "value before start" to fall back to, and must raise rather
-    than silently substitute an unrelated value.
+def test_build_d1_offset_zero_skips_early_timesteps():
+    """A d=1 surrogate at offset==0 skips t <= p and builds from t=p+1.
+
+    The caller is expected to fix target[0]...target[p] to the first p+1
+    training values so the remaining constraints are well-determined.
     """
     m, unit = _make_unit(n_points=5)
     data = _minimal_arima_data(p=1, q=0, n_exog=0, n_resid=5)
     data["order"] = [1, 1, 0]
     data["init_values"] = [0.0]
     surrogate = ArimaSurrogate(data)
-    with pytest.raises(FlexConfigError, match="d=1"):
-        surrogate.build(unit, unit.biogas_m3_hour)
+    body = surrogate.build(unit, unit.biogas_m3_hour)
+
+    # t=0 and t=1 should be skipped because d=1 and offset==0
+    assert body(0) is pyo.Constraint.Skip
+    assert body(1) is pyo.Constraint.Skip
+
+    # t=2 should return a valid expression
+    expr = body(2)
+    assert expr is not None
 
 
 @pytest.mark.unit
