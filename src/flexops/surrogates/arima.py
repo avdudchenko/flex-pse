@@ -10,6 +10,7 @@ ARIMA relationship.
      "order": [p, d, q],
      "seasonal_order": [P, D, Q, m] | None,
      "const": <float>,
+     "drift": <float> | None,        # only present when include_drift=True and d=1
      "ar_coefs": [phi_1, ..., phi_p],
      "ma_coefs": [theta_1, ..., theta_q],
      "exog_coefs": [beta_1, ..., beta_k],
@@ -53,6 +54,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 import pandas as pd
+import pyomo.environ as pyo
 from pyomo.environ import units as pyunits
 
 from flexcore.config.schema import SurrogateType
@@ -77,7 +79,7 @@ _DATA_KEYS = (
 )
 """tuple: keys that must be present in ``data``."""
 
-_OPTIONAL_KEYS = ("seasonal_order", "init_values")
+_OPTIONAL_KEYS = ("seasonal_order", "init_values", "drift")
 """tuple: keys that are optional in ``data``."""
 
 
@@ -295,10 +297,16 @@ class ArimaSurrogate(Surrogate):
         returned expression; no Params or other components are added to
         ``unit``.
 
-        ``body(t)`` is well-defined for every time index ``t``: for
-        ``t < p`` the AR lag terms fall back to the ``init_values`` from
-        ``data``; the MA terms use zero for negative residual indices. It
-        never returns ``pyomo.environ.Constraint.Skip``.
+        ``body(t)`` is well-defined for every time index ``t`` in the model
+        horizon. For ``d==0``, ``t < p`` falls back to ``init_values``; for
+        ``d==1`` and ``offset==0`` (model starts exactly at training start),
+        the first ``p+1`` time steps return ``pyomo.environ.Constraint.Skip``
+        because the differenced recursion needs ``y[-1]``, which does not
+        exist. The caller should fix ``target[0]...target[p]`` to the first
+        ``p+1`` training values so the remaining constraints are
+        well-determined. For ``d==1`` and ``offset>0``, the full horizon is
+        built using the training value immediately before the model start.
+        MA terms use zero for negative residual indices.
 
         Args:
             unit: The :class:`~flexops.core.ops_block.OpsBlockData` the
@@ -313,12 +321,9 @@ class ArimaSurrogate(Surrogate):
         Raises:
             FlexConfigError: If the model's ``TimeBlock`` time step does not
                 match the training time step, if the model starts before or
-                too far beyond the training window, or if ``order[1]`` (the
-                differencing order ``d``) is greater than 0 and the model
-                starts exactly at (or before) the training data's first row
-                — ``d>0`` needs a known value immediately before the
-                model's start, which only exists once the model starts
-                strictly after the training start.
+                too far beyond the training window, or if ``d==1`` and the
+                model starts more than one time step before the training data
+                (so the required pre-start value is unavailable).
         """
         output_units = parse_units(next(iter(self.output_variables.values())))
 
@@ -337,6 +342,9 @@ class ArimaSurrogate(Surrogate):
         ma_coefs = [float(v) for v in self.data["ma_coefs"]]
         exog_coefs = [float(v) for v in self.data["exog_coefs"]]
         exog_names: list[str] = list(self.data["exogenous_variables"])
+        drift = self.data.get("drift", None)
+        if drift is not None:
+            drift = float(drift)
 
         # Fitted residuals from the direct-fit model (length n_train).
         residuals: list[float] = self.data.get("_residuals", [0.0] * p)
@@ -388,18 +396,13 @@ class ArimaSurrogate(Surrogate):
             init_values = [float(v) for v in self.data.get("init_values", [0.0] * p)]
         else:
             if offset == 0:
-                raise FlexConfigError(
-                    f"ARIMA surrogate with d={d}>0 requires the model to start "
-                    f"strictly after the training data's first row, so that the "
-                    f"value immediately before the model's start "
-                    f"(training index -1) is known. The model starts exactly at "
-                    f"the training start ({training_start.isoformat()}); start "
-                    f"it at least one time step later, or re-fit with training "
-                    f"data that begins earlier.",
-                    field="training_start_date",
-                    value=training_start_str,
-                )
-            init_values = [float(training_y_values[offset - 1])]
+                # d=1 and model starts exactly at training start: the first
+                # p+1 constraints are skipped in body(t) because the
+                # differenced recursion needs y[-1]. The caller should fix
+                # target[0]...target[p] to the first p+1 training values.
+                init_values = [0.0]
+            else:
+                init_values = [float(training_y_values[offset - 1])]
 
         exog_vars = [
             unit.resolve_variable(name, field="input_variables") for name in exog_names
@@ -418,9 +421,15 @@ class ArimaSurrogate(Surrogate):
             training_idx = offset + t_idx - lag
             if training_idx < 0:
                 if offset == 0:
-                    # d>0 with offset==0 is rejected earlier in build() (a
-                    # d>0 model needs a known value immediately before the
-                    # model's start), so d==0 is guaranteed here.
+                    if d == 1:
+                        raise FlexConfigError(
+                            f"ARIMA d=1 AR lag {lag} at model time {t_idx} maps "
+                            f"to training index {training_idx}, before training "
+                            f"start. For d=1 at offset==0, body(t) skips t <= p; "
+                            f"this path should be unreachable.",
+                            field="training_start_date",
+                            value=training_start_str,
+                        )
                     return init_values[p - lag + t_idx] * output_units
                 raise FlexConfigError(
                     f"ARIMA AR lag {lag} at model time {t_idx} maps to "
@@ -474,6 +483,8 @@ class ArimaSurrogate(Surrogate):
             return 0.0 * output_units
 
         def body(t):
+            if d == 1 and offset == 0 and int(t) <= p:
+                return pyo.Constraint.Skip
             ar_sum = sum(
                 ar_coefs[j] * (_y_lag(t, j + 1) / output_units) for j in range(p)
             )
@@ -485,14 +496,21 @@ class ArimaSurrogate(Surrogate):
                 * (pyunits.convert(exog_vars[k][t], exog_units[k]) / exog_units[k])
                 for k in range(len(exog_names))
             )
+            drift_part = 0.0
+            if drift is not None:
+                # Use absolute training time index (1-based) so the surrogate
+                # reproduces the trained in-sample path before optimization.
+                drift_part = drift * (offset + int(t) + 1)
             if d == 0:
-                return (const + ar_sum + ma_sum + exog_sum) * output_units
+                return (const + drift_part + ar_sum + ma_sum + exog_sum) * output_units
             else:
-                # d=1: y[t] = y[t-1] + c + AR(differences) + MA + exog
+                # d=1: y[t] = y[t-1] + c + drift*t + AR(differences) + MA + exog
                 if int(t) == 0:
                     prev_y = init_values[0]
                 else:
                     prev_y = target[t - 1] / output_units
-                return (prev_y + const + ar_sum + ma_sum + exog_sum) * output_units
+                return (
+                    prev_y + const + drift_part + ar_sum + ma_sum + exog_sum
+                ) * output_units
 
         return body

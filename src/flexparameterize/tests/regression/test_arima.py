@@ -474,15 +474,38 @@ def test_auto_arima_seasonal_search_with_nonzero_PQ_raises(monkeypatch):
 
 
 @pytest.mark.unit
-def test_include_drift_raises():
-    """include_drift=True raises FlexConfigError."""
+def test_include_drift_raises_with_d0():
+    """include_drift=True with d=0 raises FlexConfigError."""
     with pytest.raises(FlexConfigError, match="include_drift"):
         ArimaRegressor(order=(1, 0, 0), include_drift=True)
 
 
 @pytest.mark.unit
-def test_auto_arima_respects_d_zero():
-    """auto=True forces d=0 and D=0 even if user passes different kwargs."""
+def test_include_drift_with_d1_fits_and_spec_includes_drift():
+    """include_drift=True with d=1 fits and spec emits drift."""
+    pytest.importorskip("scipy")
+
+    rng = np.random.default_rng(99)
+    n = 80
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    # Generate data with a linear trend so drift is meaningful
+    vals = 0.1 * np.arange(n) + rng.normal(0, 0.1, size=n)
+    y = pd.DataFrame({"y": vals}, index=idx)
+
+    regressor = ArimaRegressor(
+        order=(1, 1, 0), include_drift=True, max_ar_persistence=None
+    ).fit(pd.DataFrame(index=idx), y)
+    assert regressor.fitted is True
+    assert regressor.order[1] == 1
+
+    spec = regressor.to_surrogate_spec(input_units={}, output_units="unit")
+    assert "drift" in spec.data
+    assert isinstance(spec.data["drift"], float)
+
+
+@pytest.mark.unit
+def test_auto_arima_d_in_zero_or_one():
+    """auto=True allows d=0 or d=1, but rejects d>1."""
     pytest.importorskip("scipy")
 
     rng = np.random.default_rng(42)
@@ -491,12 +514,37 @@ def test_auto_arima_respects_d_zero():
     vals = np.cumsum(rng.normal(0, 0.1, size=n))
     y = pd.DataFrame({"y": vals}, index=idx)
 
-    # User requests max_d=1, but auto mode should override to d=0
     regressor = ArimaRegressor(
         auto=True, max_p=2, max_q=2, max_d=1, max_ar_persistence=None
     ).fit(pd.DataFrame(index=idx), y)
     assert regressor.order is not None
-    assert regressor.order[1] == 0  # d must be 0
+    assert regressor.order[1] in (0, 1)
+
+
+@pytest.mark.unit
+def test_auto_arima_d_greater_than_one_raises(monkeypatch):
+    """auto=True with a search that selects d>1 raises FlexConfigError."""
+    pytest.importorskip("scipy")
+
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    y = pd.DataFrame({"y": np.random.default_rng(0).normal(size=n)}, index=idx)
+
+    # _auto_select_order is monkeypatched to return d=2
+    from flexparameterize.regression import arima as arima_module
+
+    original = arima_module._auto_select_order
+
+    def _fake_auto(*_args, **_kwargs):
+        return (1, 2, 1), None
+
+    monkeypatch.setattr(arima_module, "_auto_select_order", _fake_auto)
+    try:
+        regressor = ArimaRegressor(auto=True, max_ar_persistence=None)
+        with pytest.raises(FlexConfigError, match="d=2"):
+            regressor.fit(pd.DataFrame(index=idx), y)
+    finally:
+        monkeypatch.setattr(arima_module, "_auto_select_order", original)
 
 
 @pytest.mark.unit

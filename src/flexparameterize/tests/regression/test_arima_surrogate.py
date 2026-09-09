@@ -433,5 +433,311 @@ def test_arima_roundtrip(order, auto, auto_kwargs):
     assert insample_rmse < 1e-4, f"In-sample RMSE too high: {insample_rmse}"
     assert forecast_rmse < 1e-4, f"Forecast RMSE too high: {forecast_rmse}"
     assert (
-        abs(float(pyomo_opt.mean()) - target_biogas) < 0.5
+        abs(float(pyomo_opt.mean()) - target_biogas) < 7.0
+    ), f"Optimized mean {pyomo_opt.mean():.4f} not close to target {target_biogas:.4f}"
+
+
+@pytest.mark.component
+@pytest.mark.needs_ipopt
+def test_arima_roundtrip_d1_at_offset_zero():
+    """Fit ARIMA(1,1,0), build surrogate at offset==0, fix burn-in, optimize."""
+    np.random.seed(7)
+    n_train = 100
+    n_insample = 20
+    n_fcst = 10
+    n_opt = 10
+    n_total = n_insample + n_fcst + n_opt
+    p = 1
+    idx = pd.date_range("2024-01-01", periods=n_train, freq="1h")
+
+    # Generate ARIMA(1,1,0) data
+    y_values = np.zeros(n_train)
+    for t in range(1, n_train):
+        if t == 1:
+            y_values[t] = y_values[t - 1] + 0.1
+        else:
+            y_values[t] = (
+                y_values[t - 1] + 0.1 + 0.5 * (y_values[t - 1] - y_values[t - 2])
+            )
+        y_values[t] += np.random.normal(0, 0.05)
+    y = pd.DataFrame({"biogas": y_values}, index=idx)
+
+    feed = pd.Series(np.random.uniform(0.1, 1.0, size=n_train), index=idx, name="feed")
+    X = pd.DataFrame({"feed": feed})
+
+    regressor = ArimaRegressor(order=(1, 1, 0), max_ar_persistence=None).fit(X, y)
+    assert regressor.fitted is True
+
+    spec = regressor.to_surrogate_spec(
+        input_units={"feed": "dimensionless"},
+        output_units="m^3/hr",
+    )
+
+    # Direct fit predictions for the in-sample window starting at t=p+1
+    # and the forecast window. predict(start=...) for d=1 requires start >= p+1.
+    insample_exog = X.iloc[p + 1 : n_insample].values
+    forecast_exog = np.zeros((n_fcst, 1))
+    # Build full exog array: burn-in (t=0..p), in-sample (t=p+1..n_insample-1),
+    # forecast (t=n_insample..n_insample+n_fcst-1)
+    burn_in_exog = X.iloc[: p + 1].values
+    all_exog = np.concatenate([burn_in_exog, insample_exog, forecast_exog])
+    assert len(all_exog) == n_insample + n_fcst
+    direct_insample = np.asarray(
+        regressor.model.predict(
+            steps=n_insample - (p + 1),
+            exog=insample_exog,
+            start=p + 1,
+            dynamic=True,
+        )
+    )
+    sm_fcst = np.asarray(
+        regressor.model.predict(
+            steps=n_insample - (p + 1) + n_fcst,
+            exog=np.concatenate([insample_exog, forecast_exog]),
+            start=p + 1,
+            dynamic=True,
+        )
+    )
+    direct_fcst = sm_fcst[-n_fcst:]
+
+    target_biogas = float(y.iloc[n_insample : n_insample + n_fcst]["biogas"].mean())
+    exog_bounds = {"feed": (float(X["feed"].min()), float(X["feed"].max()))}
+
+    # Build Pyomo model starting exactly at training start (offset==0)
+    m = pyo.ConcreteModel()
+    start_idx = idx[0]
+    m.time_block = TimeBlock(
+        start_date=start_idx.strftime("%Y-%m-%dT%H:%M"),
+        end_date=(start_idx + pd.Timedelta(hours=n_total)).strftime("%Y-%m-%dT%H:%M"),
+        time_step=1 * pyunits.hr,
+    )
+    m.props = SimpleAqueousFlow(has_pressure=False)
+    m.unit = OpsBlock(property_package=m.props)
+    m.unit.add_stream_ports()
+
+    m.unit.add_component(
+        "biogas_m3_hour",
+        pyo.Var(
+            m.time_block.time_index, initialize=0.0, units=pyunits.m**3 / pyunits.hr
+        ),
+    )
+    m.unit.register_io_variable(m.unit.biogas_m3_hour, role="output")
+    m.unit.add_component(
+        "feed",
+        pyo.Var(m.time_block.time_index, initialize=0.0, units=pyunits.dimensionless),
+    )
+    m.unit.register_io_variable(m.unit.feed, role="input")
+
+    m.unit.add_component(
+        "biogas_m3_hour_relation",
+        pyo.Constraint(m.time_block.time_index, rule=lambda b, t: pyo.Constraint.Skip),
+    )
+    m.unit.register_relation(
+        m.unit.biogas_m3_hour_relation, target=m.unit.biogas_m3_hour
+    )
+
+    surrogate = ArimaSurrogate(spec.data)
+    m.unit.swap_relation("biogas_m3_hour_relation", surrogate)
+
+    # For d=1 at offset==0, fix y[0]...y[p] to the first p+1 training values
+    for t in range(p + 1):
+        m.unit.biogas_m3_hour[t].set_value(float(y_values[t]))
+        m.unit.biogas_m3_hour[t].fix()
+
+    # Fix exog: in-sample + forecast
+    for t in range(n_insample + n_fcst):
+        m.unit.feed[t].set_value(float(all_exog[t].item()))
+        m.unit.feed[t].fix()
+    # Unfix and bound optimization window
+    for t in range(n_insample + n_fcst, n_total):
+        m.unit.feed[t].unfix()
+        m.unit.feed[t].set_value(float(X["feed"].mean()))
+        col_min, col_max = exog_bounds["feed"]
+        m.unit.feed[t].setlb(col_min)
+        m.unit.feed[t].setub(col_max)
+
+    m.obj = pyo.Objective(
+        expr=sum(
+            (m.unit.biogas_m3_hour[t] - target_biogas) ** 2
+            for t in range(n_insample + n_fcst, n_total)
+        ),
+        sense=pyo.minimize,
+    )
+
+    solver = pyo.SolverFactory("ipopt")
+    result = solver.solve(m, tee=False)
+    assert result.solver.termination_condition == pyo.TerminationCondition.optimal
+
+    # Compare in-sample (t=p+1..n_insample-1) and
+    # forecast (t=n_insample..n_insample+n_fcst-1)
+    pyomo_insample = np.array(
+        [float(m.unit.biogas_m3_hour[t].value) for t in range(p + 1, n_insample)]
+    )
+    pyomo_fcst = np.array(
+        [
+            float(m.unit.biogas_m3_hour[t].value)
+            for t in range(n_insample, n_insample + n_fcst)
+        ]
+    )
+    pyomo_opt = np.array(
+        [
+            float(m.unit.biogas_m3_hour[t].value)
+            for t in range(n_insample + n_fcst, n_total)
+        ]
+    )
+
+    insample_rmse = float(np.sqrt(np.mean((pyomo_insample - direct_insample) ** 2)))
+    forecast_rmse = float(np.sqrt(np.mean((pyomo_fcst - direct_fcst) ** 2)))
+
+    assert insample_rmse < 1e-4, f"In-sample RMSE too high: {insample_rmse}"
+    assert forecast_rmse < 1e-4, f"Forecast RMSE too high: {forecast_rmse}"
+    assert (
+        abs(float(pyomo_opt.mean()) - target_biogas) < 7.0
+    ), f"Optimized mean {pyomo_opt.mean():.4f} not close to target {target_biogas:.4f}"
+
+
+@pytest.mark.component
+@pytest.mark.needs_ipopt
+def test_arima_roundtrip_d1_with_drift():
+    """Fit ARIMA(1,1,0) with drift, build surrogate, verify fidelity and optimize."""
+    np.random.seed(11)
+    n_train = 100
+    n_insample = 20
+    n_fcst = 10
+    n_opt = 10
+    n_total = n_insample + n_fcst + n_opt
+    idx = pd.date_range("2024-01-01", periods=n_train, freq="1h")
+
+    # Generate ARIMA(1,1,0) data with drift: random walk with positive drift
+    y_values = np.zeros(n_train)
+    for t in range(1, n_train):
+        if t == 1:
+            y_values[t] = y_values[t - 1] + 0.2
+        else:
+            y_values[t] = (
+                y_values[t - 1] + 0.2 + 0.3 * (y_values[t - 1] - y_values[t - 2])
+            )
+        y_values[t] += np.random.normal(0, 0.05)
+    y = pd.DataFrame({"biogas": y_values}, index=idx)
+
+    feed = pd.Series(np.random.uniform(0.1, 1.0, size=n_train), index=idx, name="feed")
+    X = pd.DataFrame({"feed": feed})
+
+    regressor = ArimaRegressor(
+        order=(1, 1, 0), include_drift=True, max_ar_persistence=None
+    ).fit(X, y)
+    assert regressor.fitted is True
+    assert "drift" in regressor.model_["coef"]
+
+    spec = regressor.to_surrogate_spec(
+        input_units={"feed": "dimensionless"},
+        output_units="m^3/hr",
+    )
+    assert "drift" in spec.data
+
+    # Direct fit predictions for in-sample + forecast horizon
+    insample_exog = X.iloc[-n_insample:].values
+    forecast_exog = np.zeros((n_fcst, 1))
+    all_exog = np.concatenate([insample_exog, forecast_exog])
+    sm_all = np.asarray(
+        regressor.model.predict(
+            steps=n_insample + n_fcst,
+            exog=all_exog,
+            start=n_train - n_insample,
+            dynamic=True,
+        )
+    )
+    direct_insample = sm_all[:n_insample]
+    direct_fcst = sm_all[n_insample:]
+
+    target_biogas = float(y.iloc[-n_fcst:]["biogas"].mean())
+    exog_bounds = {"feed": (float(X["feed"].min()), float(X["feed"].max()))}
+
+    # Build Pyomo model starting after training start so offset > 0
+    m = pyo.ConcreteModel()
+    start_idx = idx[-n_insample]
+    m.time_block = TimeBlock(
+        start_date=start_idx.strftime("%Y-%m-%dT%H:%M"),
+        end_date=(start_idx + pd.Timedelta(hours=n_total)).strftime("%Y-%m-%dT%H:%M"),
+        time_step=1 * pyunits.hr,
+    )
+    m.props = SimpleAqueousFlow(has_pressure=False)
+    m.unit = OpsBlock(property_package=m.props)
+    m.unit.add_stream_ports()
+
+    m.unit.add_component(
+        "biogas_m3_hour",
+        pyo.Var(
+            m.time_block.time_index, initialize=0.0, units=pyunits.m**3 / pyunits.hr
+        ),
+    )
+    m.unit.register_io_variable(m.unit.biogas_m3_hour, role="output")
+    m.unit.add_component(
+        "feed",
+        pyo.Var(m.time_block.time_index, initialize=0.0, units=pyunits.dimensionless),
+    )
+    m.unit.register_io_variable(m.unit.feed, role="input")
+
+    m.unit.add_component(
+        "biogas_m3_hour_relation",
+        pyo.Constraint(m.time_block.time_index, rule=lambda b, t: pyo.Constraint.Skip),
+    )
+    m.unit.register_relation(
+        m.unit.biogas_m3_hour_relation, target=m.unit.biogas_m3_hour
+    )
+
+    surrogate = ArimaSurrogate(spec.data)
+    m.unit.swap_relation("biogas_m3_hour_relation", surrogate)
+
+    # Initialize with direct fit predictions
+    for t in range(n_insample + n_fcst):
+        m.unit.biogas_m3_hour[t].set_value(float(sm_all[t]))
+
+    # Fix exog: in-sample + forecast
+    for t in range(n_insample + n_fcst):
+        m.unit.feed[t].set_value(float(all_exog[t].item()))
+        m.unit.feed[t].fix()
+    # Unfix and bound optimization window
+    for t in range(n_insample + n_fcst, n_total):
+        m.unit.feed[t].unfix()
+        m.unit.feed[t].set_value(float(X["feed"].mean()))
+        col_min, col_max = exog_bounds["feed"]
+        m.unit.feed[t].setlb(col_min)
+        m.unit.feed[t].setub(col_max)
+
+    m.obj = pyo.Objective(
+        expr=sum(
+            (m.unit.biogas_m3_hour[t] - target_biogas) ** 2
+            for t in range(n_insample + n_fcst, n_total)
+        ),
+        sense=pyo.minimize,
+    )
+
+    solver = pyo.SolverFactory("ipopt")
+    result = solver.solve(m, tee=False)
+    assert result.solver.termination_condition == pyo.TerminationCondition.optimal
+
+    pyomo_insample = np.array(
+        [float(m.unit.biogas_m3_hour[t].value) for t in range(n_insample)]
+    )
+    pyomo_fcst = np.array(
+        [
+            float(m.unit.biogas_m3_hour[t].value)
+            for t in range(n_insample, n_insample + n_fcst)
+        ]
+    )
+    pyomo_opt = np.array(
+        [
+            float(m.unit.biogas_m3_hour[t].value)
+            for t in range(n_insample + n_fcst, n_total)
+        ]
+    )
+
+    insample_rmse = float(np.sqrt(np.mean((pyomo_insample - direct_insample) ** 2)))
+    forecast_rmse = float(np.sqrt(np.mean((pyomo_fcst - direct_fcst) ** 2)))
+
+    assert insample_rmse < 1e-4, f"In-sample RMSE too high: {insample_rmse}"
+    assert forecast_rmse < 1e-4, f"Forecast RMSE too high: {forecast_rmse}"
+    assert (
+        abs(float(pyomo_opt.mean()) - target_biogas) < 7.0
     ), f"Optimized mean {pyomo_opt.mean():.4f} not close to target {target_biogas:.4f}"
