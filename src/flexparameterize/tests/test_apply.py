@@ -65,13 +65,13 @@ def test_apply_swaps_energy_relation_in_place():
     )
 
     relation = unit.power_electrical_relation
-    fitted = unit.find_component("power_electrical_relation_fitted")
+    fitted = unit.surrogate_power_electrical.fitted
     assert all(not relation[t].active for t in m.time_block.time_index)
     assert fitted is not None
     assert all(fitted[t].active for t in m.time_block.time_index)
     assert unit.inlet is inlet and unit.outlet is outlet
     assert set(unit.component_map()) - components_before == {
-        "power_electrical_relation_fitted"
+        "surrogate_power_electrical"
     }
     assert report.swapped_relations == {unit.name: ["power_electrical_relation"]}
 
@@ -102,7 +102,7 @@ def test_apply_swaps_energy_relation_to_multilinear():
     unit.outlet_state.pressure[0].set_value(3.0e5)
     unit.power_electrical[0].set_value(0.0)
     # power - (1.0 + 0.4*10 + 1e-5*3e5 + 2e-6*10*3e5) == -(1 + 4 + 3 + 6)
-    assert pyo.value(unit.power_electrical_relation_fitted[0].body) == pytest.approx(
+    assert pyo.value(unit.surrogate_power_electrical.fitted[0].body) == pytest.approx(
         -14.0
     )
 
@@ -137,8 +137,11 @@ def test_apply_with_supplied_surrogate_skips_fit():
     )
 
     assert report.swapped_relations == {vendor.name: ["power_electrical_relation"]}
-    assert vendor.find_component("power_electrical_relation_fitted") is not None
-    assert vendor.name not in report.fixed_parameters
+    assert vendor.surrogate_power_electrical.fitted is not None
+    assert report.fixed_parameters[vendor.name] == {"flow_in": 2.0, "intercept": 0.0}
+    assert vendor.name not in {
+        k for k, v in report.fixed_parameters.items() if k != vendor.name
+    }
     assert pyo.value(fitted_unit.energy_intensity) == pytest.approx(INTENSITY, rel=1e-6)
     assert fitted_unit.name in report.fixed_parameters
 

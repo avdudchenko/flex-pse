@@ -5,11 +5,14 @@ what used to be called ``linear`` (no cross terms) and ``bilinear`` (one).
 
 from typing import ClassVar
 
+import pyomo.environ as pyo
+from pyomo.core.base.label import alphanum_label_from_name
 from pyomo.core.base.units_container import UnitsError
 from pyomo.environ import units as pyunits
 
 from flexcore.config.schema import SurrogateType
 from flexcore.exceptions import FlexConfigError
+from flexops.core.registration import CoefficientRegistry
 from flexops.core.units import parse_units
 from flexops.surrogates.base import Surrogate
 
@@ -156,7 +159,12 @@ class MultilinearSurrogate(Surrogate):
         return dict(self.data["output_variables"])
 
     def build(self, unit, target):
-        """Return ``body(t)`` in this surrogate's declared output units.
+        """Return ``(block, body(t))`` in this surrogate's declared output units.
+
+        The returned block is a ``pyo.Block(concrete=True)`` carrying a
+        ``coefficients`` :class:`CoefficientRegistry` populated with scalar
+        ``pyo.Var`` objects initialized from the spec data. The block is
+        returned un-added; ``swap_relation`` attaches it to ``unit`` itself.
 
         Args:
             unit: The unit the relationship is built on.
@@ -164,8 +172,10 @@ class MultilinearSurrogate(Surrogate):
                 units -- but part of every builder's signature.
 
         Returns:
-            A callable taking a time index and returning a Pyomo expression
-            in the declared output units.
+            A tuple ``(block, body)`` where ``block`` is the surrogate's
+            coefficient block (or ``None`` if no coefficients are present),
+            and ``body`` is a callable taking a time index and returning a
+            Pyomo expression in the declared output units.
         """
         del target
         output_units = parse_units(next(iter(self.output_variables.values())))
@@ -176,18 +186,38 @@ class MultilinearSurrogate(Surrogate):
             )
             for name, units in self.input_variables.items()
         }
+
+        coefficients = CoefficientRegistry()
+
         intercept = self.data["coefficients"].get(_INTERCEPT, 0.0)
-        terms = [
-            (float(coefficient), key.split("*"))
-            for key, coefficient in self.data["coefficients"].items()
-            if key != _INTERCEPT
-        ]
+
+        block = pyo.Block(concrete=True)
+        block.coefficients = coefficients
+
+        intercept_var = pyo.Var(initialize=float(intercept))
+        intercept_component_name = alphanum_label_from_name(_INTERCEPT)
+        block.add_component(intercept_component_name, intercept_var)
+        intercept_var.construct()
+        coefficients.register_coefficient(_INTERCEPT, intercept_var)
+
+        for key, value in self.data["coefficients"].items():
+            if key == _INTERCEPT:
+                continue
+            component_name = alphanum_label_from_name(key)
+            block.add_component(component_name, pyo.Var(initialize=float(value)))
+            var = block.find_component(component_name)
+            coefficients.register_coefficient(key, var)
+
+        for _name, var in coefficients.items():
+            var.fix()
 
         def body(t):
-            total = intercept
-            for coefficient, factors in terms:
-                term = coefficient
-                for name in factors:
+            total = coefficients[_INTERCEPT]
+            for key, _ in self.data["coefficients"].items():
+                if key == _INTERCEPT:
+                    continue
+                term = coefficients[key]
+                for name in key.split("*"):
                     var, units = declared[name]
                     try:
                         converted = pyunits.convert(var[t], units)
@@ -203,4 +233,4 @@ class MultilinearSurrogate(Surrogate):
                 total = total + term
             return total * output_units
 
-        return body
+        return block, body

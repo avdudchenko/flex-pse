@@ -15,7 +15,91 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from flexcore.exceptions import FlexConfigError
 from flexcore.nomenclature import PowerKind
+
+
+class CoefficientRegistry:
+    """A dict-like container for a surrogate block's coefficient Vars.
+
+    The registry dynamically expands as coefficients are registered. It is
+    attached to every surrogate block as ``block.coefficients`` before
+    ``build()`` returns, so a developer can call ``register_coefficient``
+    multiple times in a single ``build()`` method — useful when coefficients
+    come from several independent Var groups (e.g. separate low-flow and
+    high-flow regimes).
+
+    Attributes:
+        _vars: The internal dict mapping coefficient name -> pyo.Var.
+    """
+
+    def __init__(self) -> None:
+        self._vars: dict[str, Any] = {}
+
+    def register_coefficient(self, name: str, var: Any) -> None:
+        """Add a single named coefficient Var.
+
+        Args:
+            name: The coefficient name used by ``body(t)`` and
+                ``register_surrogate_coefficients``.
+            var: The Pyomo Var carrying this coefficient's value.
+
+        Raises:
+            FlexConfigError: If ``name`` is already registered or ``var``
+                is not a ``pyo.Var``.
+        """
+        if name in self._vars:
+            raise FlexConfigError(
+                f"Coefficient {name!r} is already registered on this block."
+            )
+        import pyomo.environ as pyo
+
+        if not isinstance(var, pyo.Var):
+            raise FlexConfigError(
+                f"Coefficient {name!r} must be a pyo.Var, got " f"{type(var).__name__}."
+            )
+        self._vars[name] = var
+
+    def register_coefficients(self, mapping: dict[str, Any]) -> None:
+        """Bulk-add coefficients from a name->Var mapping.
+
+        Args:
+            mapping: Dict of coefficient name to Pyomo Var.
+
+        Raises:
+            FlexConfigError: If any name is already registered or any value
+                is not a ``pyo.Var``.
+        """
+        for name, var in mapping.items():
+            self.register_coefficient(name, var)
+
+    def items(self):
+        """Return the registered (name, Var) pairs."""
+        return self._vars.items()
+
+    def __getitem__(self, name: str) -> Any:
+        return self._vars[name]
+
+    def __contains__(self, name: str) -> bool:
+        return name in self._vars
+
+    def __iter__(self):
+        return iter(self._vars)
+
+    def __len__(self) -> int:
+        return len(self._vars)
+
+    def unfix(self) -> None:
+        """Unfix every registered coefficient Var."""
+        for _, var in self._vars.items():
+            if var.is_variable_type() and var.is_fixed():
+                var.unfix()
+
+    def fix(self) -> None:
+        """Fix every registered coefficient Var at its current value."""
+        for _, var in self._vars.items():
+            if var.is_variable_type():
+                var.fix()
 
 
 class BoundaryKind(enum.StrEnum):
@@ -120,6 +204,12 @@ class RelationRecord:
             keep each successive ``fitted`` Constraint's name unique (flex-pse
             never deletes a component, so a second swap cannot reuse the first
             fitted Constraint's name).
+        surrogate_block: The currently active surrogate sub-block (a Pyomo
+            Block carrying coefficient Vars and the fitted constraint), or
+            ``None`` when no surrogate has been swapped for this relation.
+        surrogate_blocks: Every surrogate block ever built for this relation,
+            oldest first. The list is append-only; deactivated blocks remain
+            here so ``switch_surrogate_block`` can reactivate them.
     """
 
     constraint: Any
@@ -129,6 +219,8 @@ class RelationRecord:
     fitted: Any = None
     components: list = field(default_factory=list)
     swap_count: int = 0
+    surrogate_block: Any = None
+    surrogate_blocks: list = field(default_factory=list)
 
 
 @dataclass

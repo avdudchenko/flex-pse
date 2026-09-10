@@ -206,8 +206,15 @@ def _attach_surrogate(unit, registry, surrogate) -> tuple[bool, dict[str, float]
             regressable process parameter.
     """
     if surrogate.surrogate_type is not SurrogateType.CONSTANT_INTENSITY:
-        unit.swap_relation(POWER_ELECTRICAL_RELATION, surrogate_from_spec(surrogate))
-        return True, {}
+        surrogate_obj = surrogate_from_spec(surrogate)
+        surrogate_block = unit.swap_relation(POWER_ELECTRICAL_RELATION, surrogate_obj)
+        if surrogate_block is not None:
+            unit.register_surrogate_coefficients(POWER_ELECTRICAL_RELATION)
+            for coef_name, coef_value in surrogate.data["coefficients"].items():
+                var = surrogate_block.coefficients[coef_name]
+                var.set_value(coef_value)
+                var.fix()
+        return True, dict(surrogate.data["coefficients"])
 
     coefficient = constant_intensity_coefficient(surrogate)
     regressable = {
@@ -264,6 +271,7 @@ def apply_to_model(
     tagmap: TagMap,
     surrogates: dict | None = None,
     *,
+    active_surrogates: dict[str, str] | None = None,
     min_rows: int = DEFAULT_MIN_ROWS,
 ) -> ApplyReport:
     """Fit a built model's registered parameters from data and mutate it in place.
@@ -287,6 +295,13 @@ def apply_to_model(
             relations (see
             :meth:`~flexops.core.ops_block.OpsBlockData.register_relation`) —
             an RO skid's ``split_definition``, a tank's ``level_definition``.
+        active_surrogates: Optional mapping of unit name to the local name of
+            a pre-built surrogate block to activate before fitting (e.g.
+            ``"surrogate_power"``). The block must already exist on the unit
+            from a prior ``swap_relation`` call. When provided,
+            ``switch_surrogate_block`` is called for that unit before any
+            fitting or swapping, so the correct block's coefficients are
+            registered and can be refitted.
         min_rows: Minimum non-null rows a data column must carry.
 
     Returns:
@@ -310,13 +325,19 @@ def apply_to_model(
     if to_fit:
         _require_sufficient_data(model, aliased, to_fit, min_rows)
 
+    active_map = dict(active_surrogates or {})
     report = ApplyReport(dof_before=degrees_of_freedom(model))
     for unit, registry in units:
         supplied_for_unit = supplied.get(unit.name)
+        active_block = active_map.get(unit.name)
         if isinstance(supplied_for_unit, dict):
             for relation_name, spec in supplied_for_unit.items():
                 unit.swap_relation(relation_name, surrogate_from_spec(spec))
                 report.swapped_relations.setdefault(unit.name, []).append(relation_name)
+            continue
+        if active_block is not None:
+            unit.switch_surrogate_block(active_block)
+            report.swapped_relations.setdefault(unit.name, []).append(active_block)
             continue
         surrogate = supplied_for_unit
         if surrogate is None:

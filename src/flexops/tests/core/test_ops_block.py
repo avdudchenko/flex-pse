@@ -6,6 +6,7 @@ the external-dispatch hook, and the in-place ``update_parameters`` helper.
 """
 
 import math
+from typing import Any
 
 import pyomo.environ as pyo
 import pytest
@@ -792,7 +793,7 @@ def test_swap_relation_replaces_a_registered_relation():
         ),
     )
 
-    fitted = unit.find_component("flow_relation_fitted")
+    fitted = unit.surrogate_flow.fitted
     assert all(not old[t].active for t in m.time_block.time_index)
     assert fitted is not None
     assert all(fitted[t].active for t in m.time_block.time_index)
@@ -811,7 +812,7 @@ def test_swap_relation_takes_units_from_its_target():
         ),
     )
 
-    fitted = unit.flow_relation_fitted
+    fitted = unit.surrogate_flow.fitted
     # A stray kW hardcode would make this m^3/hr == m^3/hr + kW: inconsistent.
     assert_units_consistent(fitted)
     unit.flow_out[0].set_value(5.0)
@@ -842,7 +843,7 @@ def test_swap_relation_reads_a_coefficient_in_its_declared_basis():
     # 36 m^3/hr -> 0.01 m^3/s; 1.0 * 0.01 == 0.01 m^3/hr (output already
     # matches the target, so no further conversion). Naively reading 36.0 as
     # if it were already in m^3/s (no conversion) would give 36.0, not 0.01.
-    fitted = unit.flow_relation_fitted
+    fitted = unit.surrogate_flow.fitted
     assert pyo.value(fitted[0].body) == pytest.approx(36.0 - 0.01)
 
 
@@ -890,7 +891,7 @@ def test_swap_relation_accepts_a_non_multilinear_surrogate():
         def output_variables(self):
             return {"power_electrical": "kW"}
 
-        def build(self, unit, target):
+        def build(self, unit, target) -> tuple[None, Any]:
             q = unit.resolve_variable("flow_out", field="input_variables")
             c = self.data
 
@@ -899,7 +900,7 @@ def test_swap_relation_accepts_a_non_multilinear_surrogate():
                 value = c["wz"] * pyo.log(1 + pyo.exp(c["w"] * x + c["b"])) + c["c"]
                 return value * pyunits.get_units(target[t])
 
-            return body
+            return None, body
 
     _, unit = _unit_with_relation()
 
@@ -930,11 +931,11 @@ class _LaggedSurrogate(Surrogate):
     def output_variables(self):
         return {"power_electrical": "kW"}
 
-    def build(self, unit, target):
+    def build(self, unit, target) -> tuple[None, Any]:
         def body(t):
             return pyo.Constraint.Skip if t < 1 else 2.0 * pyunits.get_units(target[t])
 
-        return body
+        return None, body
 
 
 @pytest.mark.unit
@@ -973,7 +974,7 @@ def test_reswapping_deactivates_a_builders_auxiliary_constraints():
         def output_variables(self):
             return {"power_electrical": "kW"}
 
-        def build(self, unit, target):
+        def build(self, unit, target) -> tuple[None, Any]:
             tag = self.data["tag"]
             tb = unit.model().time_block
             suffix = f"_{tag:.0f}"
@@ -983,7 +984,11 @@ def test_reswapping_deactivates_a_builders_auxiliary_constraints():
                 f"aux_eq{suffix}",
                 pyo.Constraint(tb.time_index, rule=lambda b, t: z[t] == tag),
             )
-            return lambda t: z[t] * pyunits.get_units(target[t])
+
+            def body(t):
+                return z[t] * pyunits.get_units(target[t])
+
+            return None, body
 
     _, unit = _unit_with_relation()
 
@@ -1022,7 +1027,7 @@ def test_iter_swapped_relations_reports_only_swapped_relations():
     block, record = swapped[0]
     assert block is m.unit_a
     assert record.name == "power_electrical_relation"
-    assert record.fitted is m.unit_a.power_electrical_relation_fitted
+    assert record.fitted is m.unit_a.surrogate_power_electrical.fitted
 
 
 @pytest.mark.unit
@@ -1055,4 +1060,4 @@ def test_add_constant_intensity_relation_auto_swaps_from_surrogate():
         flow, intensity=0.5 * pyunits.kWh / pyunits.m**3
     )
     assert m.unit.power_electrical_relation[0].active is False
-    assert m.unit.find_component("power_electrical_relation_fitted") is not None
+    assert m.unit.surrogate_power_electrical.fitted is not None
