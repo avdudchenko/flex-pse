@@ -144,6 +144,9 @@ def test_build_places_coefficient_vars_on_the_block_with_sanitized_names():
     assert block.find_component("coefficient_vars") is not None
     assert block.find_component("intercept") is None
     assert block.find_component("flow_out_outlet_state_pressure") is None
+    from flexops.core.registration import CoefficientRegistry
+
+    assert isinstance(block.coefficients, CoefficientRegistry)
 
     assert "intercept" in block.coefficients
     assert "flow_out*outlet_state.pressure" in block.coefficients

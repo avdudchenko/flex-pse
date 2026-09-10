@@ -124,3 +124,82 @@ def test_coefficient_registry_fix_unfix():
     b.unfix()
     registry.unfix()
     assert not a.is_fixed() and not b.is_fixed()
+
+
+@pytest.mark.unit
+def test_coefficient_registry_register_indexed_var():
+    """An indexed Var is registered; individual entries are surfaced by key."""
+    m = pyo.ConcreteModel()
+    m.idx = pyo.Set(initialize=["intercept", "flow_out"])
+    m.coefs = pyo.Var(m.idx, initialize=1.0)
+    m.idx.construct()
+    m.coefs.construct()
+
+    registry = CoefficientRegistry()
+    registry.register_coefficients(m.coefs)
+
+    assert len(registry) == 2
+    assert "intercept" in registry
+    assert "flow_out" in registry
+    assert registry["intercept"] is m.coefs["intercept"]
+    assert registry["flow_out"] is m.coefs["flow_out"]
+    assert set(registry) == {"intercept", "flow_out"}
+    assert dict(registry.items()) == {
+        "intercept": m.coefs["intercept"],
+        "flow_out": m.coefs["flow_out"],
+    }
+
+
+@pytest.mark.unit
+def test_coefficient_registry_register_indexed_var_duplicate_raises():
+    """Registering an indexed Var that overlaps an existing name raises."""
+    m = pyo.ConcreteModel()
+    m.idx = pyo.Set(initialize=["a"])
+    m.coefs = pyo.Var(m.idx, initialize=1.0)
+    m.idx.construct()
+    m.coefs.construct()
+
+    registry = CoefficientRegistry()
+    registry.register_coefficient("a", pyo.Var(initialize=0.0))
+    with pytest.raises(FlexConfigError, match="already registered"):
+        registry.register_coefficients(m.coefs)
+
+
+@pytest.mark.unit
+def test_coefficient_registry_mixed_scalar_and_indexed():
+    """Scalar and indexed Vars coexist in the same flat view."""
+    m = pyo.ConcreteModel()
+    m.idx = pyo.Set(initialize=["cross"])
+    m.coefs = pyo.Var(m.idx, initialize=1.0)
+    m.idx.construct()
+    m.coefs.construct()
+
+    registry = CoefficientRegistry()
+    registry.register_coefficient("intercept", pyo.Var(initialize=0.0))
+    registry.register_coefficients(m.coefs)
+
+    assert len(registry) == 2
+    assert set(registry) == {"intercept", "cross"}
+    assert registry["intercept"].is_variable_type()
+    assert registry["cross"] is m.coefs["cross"]
+
+
+@pytest.mark.unit
+def test_coefficient_registry_fix_unfix_indexed():
+    """fix/unfix traverse every indexed Var entry."""
+    m = pyo.ConcreteModel()
+    m.idx = pyo.Set(initialize=["a", "b"])
+    m.coefs = pyo.Var(m.idx, initialize=1.0)
+    m.idx.construct()
+    m.coefs.construct()
+
+    registry = CoefficientRegistry()
+    registry.register_coefficients(m.coefs)
+
+    m.coefs["a"].fix()
+    registry.fix()
+    assert m.coefs["a"].is_fixed() and m.coefs["b"].is_fixed()
+
+    m.coefs["b"].unfix()
+    registry.unfix()
+    assert not m.coefs["a"].is_fixed() and not m.coefs["b"].is_fixed()

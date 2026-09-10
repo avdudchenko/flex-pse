@@ -5,6 +5,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Surrogate coefficient management API.** `OpsBlockData` now exposes `list_surrogate_blocks(relation_name=None)`, `current_surrogate_block(relation_name=None)`, `switch_surrogate_block(block_name)`, `fix_surrogate_coefficients(relation_name=None)`, and `unfix_surrogate_coefficients(relation_name=None)`. When called without `relation_name`, list/current operate across all relations on the unit, matching the common case of a single-relation unit.
+- **`CoefficientRegistry` supports indexed Vars.** The registry now accepts both scalar `pyo.Var` and indexed `pyo.Var` objects. `register_coefficients` detects an indexed Var and iterates over its index set automatically, surfacing a flat `name → VarData` view to callers. This removes the need for per-coefficient name sanitization in `MultilinearSurrogate`.
+- **`MultilinearSurrogate` uses a single indexed Var for coefficients.** Instead of creating one scalar `pyo.Var` per coefficient (requiring `alphanum_label_from_name` sanitization that could collide), `build()` now creates one `coefficient_vars = pyo.Var(index_set, initialize=1.0)` keyed by the raw coefficient strings including `"intercept"`. Raw keys like `"flow_out*outlet_state.pressure"` are preserved exactly.
+- **`update_parameters` works on surrogate coefficients.** Registered surrogate coefficient Vars (including indexed-Var entries) can now be mutated in place through the standard `update_parameters` path. The fitted constraint body sees new values without any component rebuild.
+- **Comprehensive tests for surrogate block lifecycle.** New tests cover switching among 3+ surrogate blocks with correct activate/deactivate semantics, `list_surrogate_blocks` and `current_surrogate_block` with and without `relation_name`, named-relation fix/unfix, `CoefficientRegistry` duplicate/non-Var/bulk registration, and `update_parameters` on surrogate coefficients.
+
+### Changed
+
+- **`register_surrogate_coefficients` now uses registry key names for `ParameterRecord`.** When coefficients are stored in an indexed Var, the parameter name stored in the IO registry is the raw coefficient key (e.g. `"flow_out*outlet_state.pressure"`), not the parent block's `local_name`. This makes target removal and parameter lookup correct for all coefficient storage modes.
+- **`swap_relation` fitted constraint activation.** `switch_surrogate_block` now explicitly activates the fitted `Constraint` after `block.activate()`, because Pyomo `Block.activate()` does not cascade to child `Constraint` objects that were explicitly deactivated.
+
 ## [0.1.0] - 2026-09-04
 
 flex-pse 0.1.0 is the first release. It ships **flexops** and

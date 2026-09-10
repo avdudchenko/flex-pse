@@ -163,9 +163,8 @@ class MultilinearSurrogate(Surrogate):
         The returned block is a ``pyo.Block(concrete=True)`` carrying a
         ``coefficient_vars`` indexed ``pyo.Var`` (keyed by coefficient name
         plus the reserved ``"intercept"`` key) and a ``coefficients``
-        :class:`CoefficientRegistry` facade over that indexed Var. The block
-        is returned un-added; ``swap_relation`` attaches it to ``unit``
-        itself.
+        ``CoefficientRegistry`` over that indexed Var. The block is returned
+        un-added; ``swap_relation`` attaches it to ``unit`` itself.
 
         Args:
             unit: The unit the relationship is built on.
