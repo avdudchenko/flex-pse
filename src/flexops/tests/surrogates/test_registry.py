@@ -236,6 +236,38 @@ def test_coefficient_registry_mixed_scalar_and_indexed():
 
 
 @pytest.mark.unit
+def test_coefficient_registry_mixed_items_contains_fix_unfix():
+    """items, __contains__, fix, and unfix all traverse both storage modes."""
+    m = pyo.ConcreteModel()
+    m.idx = pyo.Set(initialize=["flow_out"])
+    m.coefs = pyo.Var(m.idx, initialize=2.0)
+    m.idx.construct()
+    m.coefs.construct()
+
+    intercept = pyo.Var(initialize=1.0)
+    m.add_component("intercept", intercept)
+    intercept.construct()
+
+    registry = CoefficientRegistry()
+    registry.register_coefficient("intercept", intercept)
+    registry.register_coefficients(m.coefs)
+
+    item_keys = [key for key, _ in registry.items()]
+    assert set(item_keys) == {"intercept", "flow_out"}
+    assert "intercept" in registry
+    assert "flow_out" in registry
+    assert "missing" not in registry
+
+    registry.fix()
+    assert intercept.is_fixed()
+    assert m.coefs["flow_out"].is_fixed()
+
+    registry.unfix()
+    assert not intercept.is_fixed()
+    assert not m.coefs["flow_out"].is_fixed()
+
+
+@pytest.mark.unit
 def test_coefficient_registry_fix_unfix_indexed():
     """fix/unfix traverse every indexed Var entry."""
     m = pyo.ConcreteModel()

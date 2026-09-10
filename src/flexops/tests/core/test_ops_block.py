@@ -1423,3 +1423,138 @@ def test_fix_surrogate_coefficients_unknown_relation_raises():
     _, unit = _unit_with_relation()
     with pytest.raises(FlexConfigError, match="nope"):
         unit.fix_surrogate_coefficients("nope")
+
+
+class _NoCoefficientsSurrogate(Surrogate):
+    """A surrogate whose block carries no ``coefficients`` attribute."""
+
+    surrogate_type = SurrogateType.MULTILINEAR
+
+    def _validate(self):
+        pass
+
+    @property
+    def input_variables(self):
+        return {}
+
+    @property
+    def output_variables(self):
+        return {"flow_out": "m^3/hr"}
+
+    def build(self, unit, target):
+        block = pyo.Block(concrete=True)
+        output_units = pyunits.get_units(target[0])
+        return block, lambda t: 1.0 * output_units
+
+
+@pytest.mark.unit
+def test_register_surrogate_coefficients_unknown_relation_raises():
+    """An unregistered relation name raises FlexConfigError."""
+    _, unit = _unit_with_relation()
+    with pytest.raises(FlexConfigError, match="nope"):
+        unit.register_surrogate_coefficients("nope")
+
+
+@pytest.mark.unit
+def test_register_surrogate_coefficients_no_surrogate_block_raises():
+    """Registering coefficients on a relation with no swapped surrogate raises."""
+    m, unit = _flow_relation_unit()
+    with pytest.raises(FlexConfigError, match="has no surrogate block"):
+        unit.register_surrogate_coefficients("flow_relation")
+
+
+@pytest.mark.unit
+def test_register_surrogate_coefficients_no_coefficients_attribute_raises():
+    """A surrogate block without a ``coefficients`` attribute raises."""
+    m, unit = _flow_relation_unit()
+    unit.swap_relation("flow_relation", _NoCoefficientsSurrogate({}))
+    with pytest.raises(FlexConfigError, match="has no 'coefficients'"):
+        unit.register_surrogate_coefficients("flow_relation")
+
+
+@pytest.mark.unit
+def test_unfix_surrogate_coefficients_none_no_active_blocks_raises():
+    """Calling unfix with relation_name=None and no surrogates raises."""
+    _, unit = _flow_relation_unit()
+    with pytest.raises(FlexConfigError, match="has no active surrogate blocks"):
+        unit.unfix_surrogate_coefficients()
+
+
+@pytest.mark.unit
+def test_fix_surrogate_coefficients_none_no_active_blocks_raises():
+    """Calling fix with relation_name=None and no surrogates raises."""
+    _, unit = _flow_relation_unit()
+    with pytest.raises(FlexConfigError, match="has no active surrogate blocks"):
+        unit.fix_surrogate_coefficients()
+
+
+@pytest.mark.unit
+def test_unfix_surrogate_coefficients_named_relation_no_surrogate_block_raises():
+    """A registered relation with no swapped surrogate raises."""
+    m, unit = _flow_relation_unit()
+    with pytest.raises(FlexConfigError, match="has no active surrogate block"):
+        unit.unfix_surrogate_coefficients("flow_relation")
+
+
+@pytest.mark.unit
+def test_fix_surrogate_coefficients_named_relation_no_surrogate_block_raises():
+    """A registered relation with no swapped surrogate raises."""
+    m, unit = _flow_relation_unit()
+    with pytest.raises(FlexConfigError, match="has no active surrogate block"):
+        unit.fix_surrogate_coefficients("flow_relation")
+
+
+@pytest.mark.unit
+def test_unfix_surrogate_coefficients_none_skips_relations_without_surrogate():
+    """When relation_name is None, relations without surrogates are skipped."""
+    m, unit = _flow_relation_unit()
+    unit.add_component(
+        "second_flow_relation",
+        pyo.Constraint(
+            m.time_block.time_index,
+            rule=lambda b, t: unit.flow_out[t] == 10.0,
+        ),
+    )
+    unit.register_relation(unit.second_flow_relation, target=unit.flow_out)
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 1.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    for _, var in unit.surrogate_flow.coefficients.items():
+        var.fix()
+
+    unit.unfix_surrogate_coefficients()
+
+    assert all(
+        not var.is_fixed() for _, var in unit.surrogate_flow.coefficients.items()
+    )
+
+
+@pytest.mark.unit
+def test_fix_surrogate_coefficients_none_skips_relations_without_surrogate():
+    """When relation_name is None, relations without surrogates are skipped."""
+    m, unit = _flow_relation_unit()
+    unit.add_component(
+        "second_flow_relation",
+        pyo.Constraint(
+            m.time_block.time_index,
+            rule=lambda b, t: unit.flow_out[t] == 10.0,
+        ),
+    )
+    unit.register_relation(unit.second_flow_relation, target=unit.flow_out)
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 1.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    for _, var in unit.surrogate_flow.coefficients.items():
+        var.unfix()
+
+    unit.fix_surrogate_coefficients()
+
+    assert all(var.is_fixed() for _, var in unit.surrogate_flow.coefficients.items())
