@@ -177,3 +177,31 @@ def test_apply_swaps_a_named_relation():
     assert ro.name not in report.fixed_parameters
     assert fitted_unit.name in report.fixed_parameters
     assert pyo.value(fitted_unit.energy_intensity) == pytest.approx(INTENSITY, rel=1e-6)
+
+
+@pytest.mark.component
+def test_apply_switches_to_active_block():
+    """``active_surrogates`` reactivates a previously built surrogate block.
+
+    The block must already exist from a prior ``swap_relation`` (here the first
+    ``apply_to_model`` call creates it). The second call switches back to it
+    via ``switch_surrogate_block`` without refitting.
+    """
+    m, unit = build_plant()
+    data = evaluate_data(unit)
+    unit.energy_intensity.unfix()
+
+    block_name = "surrogate_power_electrical"
+    first_report = apply_to_model(
+        m, data, ALIASED, surrogates={unit.name: _multilinear_spec(INTENSITY)}
+    )
+    assert first_report.swapped_relations == {unit.name: ["power_electrical_relation"]}
+    assert unit.current_surrogate_block("power_electrical_relation") == block_name
+
+    second_report = apply_to_model(
+        m, data, ALIASED, active_surrogates={unit.name: block_name}
+    )
+
+    assert second_report.swapped_relations == {unit.name: [block_name]}
+    assert unit.current_surrogate_block("power_electrical_relation") == block_name
+    assert unit.surrogate_power_electrical.fitted is not None

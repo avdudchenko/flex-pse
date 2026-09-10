@@ -1061,3 +1061,188 @@ def test_add_constant_intensity_relation_auto_swaps_from_surrogate():
     )
     assert m.unit.power_electrical_relation[0].active is False
     assert m.unit.surrogate_power_electrical.fitted is not None
+
+
+@pytest.mark.unit
+def test_list_surrogate_blocks_empty_before_swap():
+    """No surrogate has been built, so the history is empty."""
+    _, unit = _unit_with_relation()
+    assert unit.list_surrogate_blocks("power_electrical_relation") == []
+
+
+@pytest.mark.unit
+def test_list_surrogate_blocks_after_swap():
+    """A single swap produces one entry in the history."""
+    _, unit = _flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 1.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    names = unit.list_surrogate_blocks("flow_relation")
+    assert names == ["surrogate_flow"]
+
+
+@pytest.mark.unit
+def test_list_surrogate_blocks_after_multiple_swaps():
+    """Every swap is recorded; the list is oldest first."""
+    _, unit = _flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 1.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 2.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    names = unit.list_surrogate_blocks("flow_relation")
+    assert names == ["surrogate_flow", "surrogate_flow_1"]
+
+
+@pytest.mark.unit
+def test_list_surrogate_blocks_unknown_relation_raises():
+    """An unregistered relation name raises FlexConfigError."""
+    _, unit = _unit_with_relation()
+    with pytest.raises(FlexConfigError, match="nope"):
+        unit.list_surrogate_blocks("nope")
+
+
+@pytest.mark.unit
+def test_current_surrogate_block_none_before_swap():
+    """No surrogate is active before any swap."""
+    _, unit = _unit_with_relation()
+    assert unit.current_surrogate_block("power_electrical_relation") is None
+
+
+@pytest.mark.unit
+def test_current_surrogate_block_after_swap():
+    """After a swap, current returns the active block's local name."""
+    _, unit = _flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 1.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    assert unit.current_surrogate_block("flow_relation") == "surrogate_flow"
+
+
+@pytest.mark.unit
+def test_current_surrogate_block_unknown_relation_raises():
+    """An unregistered relation name raises FlexConfigError."""
+    _, unit = _unit_with_relation()
+    with pytest.raises(FlexConfigError, match="nope"):
+        unit.current_surrogate_block("nope")
+
+
+@pytest.mark.unit
+def test_switch_surrogate_block_reactivates_previous():
+    """Switching back to a previously built block reactivates it."""
+    _, unit = _flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 1.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 2.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    assert unit.current_surrogate_block("flow_relation") == "surrogate_flow_1"
+
+    unit.switch_surrogate_block("surrogate_flow")
+    assert unit.current_surrogate_block("flow_relation") == "surrogate_flow"
+
+
+@pytest.mark.unit
+def test_switch_surrogate_block_unknown_name_raises():
+    """A block name that does not exist on the unit raises FlexConfigError."""
+    _, unit = _flow_relation_unit()
+    with pytest.raises(FlexConfigError, match="not_found"):
+        unit.switch_surrogate_block("not_found")
+
+
+@pytest.mark.unit
+def test_switch_surrogate_block_non_surrogate_name_raises():
+    """A non-surrogate component name raises FlexConfigError."""
+    _, unit = _flow_relation_unit()
+    with pytest.raises(FlexConfigError, match="flow_relation"):
+        unit.switch_surrogate_block("flow_relation")
+
+
+@pytest.mark.unit
+def test_unfix_surrogate_coefficients_named_relation():
+    """Passing a relation_name only unfixes that relation's coefficients."""
+    m, unit = _flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 1.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+
+    for _, var in unit.surrogate_flow.coefficients.items():
+        var.fix()
+
+    assert all(var.is_fixed() for _, var in unit.surrogate_flow.coefficients.items())
+
+    unit.unfix_surrogate_coefficients("flow_relation")
+
+    assert all(
+        not var.is_fixed() for _, var in unit.surrogate_flow.coefficients.items()
+    )
+
+
+@pytest.mark.unit
+def test_unfix_surrogate_coefficients_unknown_relation_raises():
+    """An unregistered relation name raises FlexConfigError."""
+    _, unit = _unit_with_relation()
+    with pytest.raises(FlexConfigError, match="nope"):
+        unit.unfix_surrogate_coefficients("nope")
+
+
+@pytest.mark.unit
+def test_fix_surrogate_coefficients_named_relation():
+    """Passing a relation_name only fixes that relation's coefficients."""
+    m, unit = _flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 1.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+
+    for _, var in unit.surrogate_flow.coefficients.items():
+        var.unfix()
+
+    assert all(
+        not var.is_fixed() for _, var in unit.surrogate_flow.coefficients.items()
+    )
+
+    unit.fix_surrogate_coefficients("flow_relation")
+
+    assert all(var.is_fixed() for _, var in unit.surrogate_flow.coefficients.items())
+
+
+@pytest.mark.unit
+def test_fix_surrogate_coefficients_unknown_relation_raises():
+    """An unregistered relation name raises FlexConfigError."""
+    _, unit = _unit_with_relation()
+    with pytest.raises(FlexConfigError, match="nope"):
+        unit.fix_surrogate_coefficients("nope")

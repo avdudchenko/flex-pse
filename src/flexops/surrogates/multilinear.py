@@ -162,7 +162,7 @@ class MultilinearSurrogate(Surrogate):
         """Return ``(block, body(t))`` in this surrogate's declared output units.
 
         The returned block is a ``pyo.Block(concrete=True)`` carrying a
-        ``coefficients`` :class:`CoefficientRegistry` populated with scalar
+        ``coefficients`` ``CoefficientRegistry`` populated with scalar
         ``pyo.Var`` objects initialized from the spec data. The block is
         returned un-added; ``swap_relation`` attaches it to ``unit`` itself.
 

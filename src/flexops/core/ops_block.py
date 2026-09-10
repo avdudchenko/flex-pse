@@ -1160,7 +1160,7 @@ class OpsBlockData(UnitModelBlockData):
         coefficients.
 
         The surrogate block's ``coefficients`` attribute is a
-        :class:`CoefficientRegistry` whose ``items()`` yields ``(name, Var)``
+        ``CoefficientRegistry`` whose ``items()`` yields ``(name, Var)``
         pairs. Any object with an ``items()`` method returning ``(str, pyo.Var)``
         pairs is accepted.
 
