@@ -151,6 +151,57 @@ def test_coefficient_registry_register_indexed_var():
 
 
 @pytest.mark.unit
+def test_coefficient_registry_indexed_var_getitem_missing_raises():
+    """Looking up a key absent from the indexed Var raises KeyError."""
+    m = pyo.ConcreteModel()
+    m.idx = pyo.Set(initialize=["a"])
+    m.coefs = pyo.Var(m.idx, initialize=1.0)
+    m.idx.construct()
+    m.coefs.construct()
+
+    registry = CoefficientRegistry()
+    registry.register_coefficients(m.coefs)
+
+    with pytest.raises(KeyError, match="b"):
+        registry["b"]
+
+
+@pytest.mark.unit
+def test_coefficient_registry_indexed_var_items_yields_vardata():
+    """items() yields (key, VarData) pairs, not the parent Var."""
+    m = pyo.ConcreteModel()
+    m.idx = pyo.Set(initialize=["intercept", "flow_out"])
+    m.coefs = pyo.Var(m.idx, initialize=1.0)
+    m.idx.construct()
+    m.coefs.construct()
+
+    registry = CoefficientRegistry()
+    registry.register_coefficients(m.coefs)
+
+    for key, var in registry.items():
+        assert key in ("intercept", "flow_out")
+        assert var is m.coefs[key]
+        assert not var.is_indexed()
+
+
+@pytest.mark.unit
+def test_coefficient_registry_indexed_var_len_zero_when_empty():
+    """An empty indexed Var registry has length zero."""
+    m = pyo.ConcreteModel()
+    m.idx = pyo.Set(initialize=[])
+    m.coefs = pyo.Var(m.idx, initialize=1.0)
+    m.idx.construct()
+    m.coefs.construct()
+
+    registry = CoefficientRegistry()
+    registry.register_coefficients(m.coefs)
+
+    assert len(registry) == 0
+    assert set(registry) == set()
+    assert list(registry.items()) == []
+
+
+@pytest.mark.unit
 def test_coefficient_registry_register_indexed_var_duplicate_raises():
     """Registering an indexed Var that overlaps an existing name raises."""
     m = pyo.ConcreteModel()
