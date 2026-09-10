@@ -230,12 +230,13 @@ def test_coefficient_registry_indexed_var_items_yields_vardata():
     m.coefs.construct()
 
     registry = CoefficientRegistry()
-    registry.register_coefficients(m.coefs)
+    registry.register_coefficient("coefs", m.coefs)
 
-    for key, var in registry.items():
-        assert key in ("intercept", "flow_out")
-        assert var is m.coefs[key]
-        assert not var.is_indexed()
+    items = list(registry.items())
+    assert len(items) == 2
+    assert items[0][0] in ("intercept", "flow_out")
+    assert items[0][1] is m.coefs[items[0][0]]
+    assert not items[0][1].is_indexed()
 
 
 @pytest.mark.unit
