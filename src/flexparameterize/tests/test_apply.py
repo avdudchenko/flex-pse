@@ -7,6 +7,8 @@ from pyomo.environ import units as pyunits
 
 from flexcore.config.schema import SurrogateSpec, SurrogateType
 from flexcore.exceptions import FlexDataError
+from flexops.surrogates import surrogate_from_spec
+from flexops.surrogates.base import Surrogate
 from flexops.unit_models import ConstantEnergyIntensityModel, ReverseOsmosis
 from flexparameterize.apply import apply_to_model
 from flexparameterize.tags import TagMap, model_alias
@@ -205,3 +207,66 @@ def test_apply_switches_to_active_block():
     assert second_report.swapped_relations == {unit.name: [block_name]}
     assert unit.current_surrogate_block("power_electrical_relation") == block_name
     assert unit.surrogate_power_electrical.fitted is not None
+
+
+class _NoCoefSurrogate(Surrogate):
+    """A surrogate whose block carries no ``coefficients`` registry."""
+
+    def _validate(self):
+        pass
+
+    @property
+    def input_variables(self):
+        return {}
+
+    @property
+    def output_variables(self):
+        return {"power_electrical": "kW"}
+
+    def build(self, unit, target):
+        def body(t):
+            return 2.0 * pyunits.get_units(target[t])
+
+        block = pyo.Block(concrete=True)
+        block.body = body
+        return block, body
+
+
+@pytest.mark.component
+def test_apply_surrogate_without_coefficients_skips_registry():
+    """A surrogate block with no ``coefficients`` is attached without error.
+
+    ``apply_to_model`` must not assume every surrogate block carries a
+    ``CoefficientRegistry``; surrogates that encode their relationship
+    directly in the fitted Constraint have nothing to register or fix.
+    """
+    m, unit = build_plant()
+    data = evaluate_data(unit)
+    unit.energy_intensity.unfix()
+
+    no_coef_spec = SurrogateSpec(
+        surrogate_type=SurrogateType.MULTILINEAR,
+        data={
+            "input_variables": {},
+            "output_variables": {"power_electrical": "kW"},
+        },
+    )
+
+    original_surrogate_from_spec = surrogate_from_spec
+
+    def _fake_surrogate_from_spec(spec):
+        if spec is no_coef_spec:
+            return _NoCoefSurrogate(spec.data)
+        return original_surrogate_from_spec(spec)
+
+    import flexparameterize.apply as apply_module
+
+    apply_module.surrogate_from_spec = _fake_surrogate_from_spec
+    try:
+        report = apply_to_model(m, data, ALIASED, surrogates={unit.name: no_coef_spec})
+    finally:
+        apply_module.surrogate_from_spec = original_surrogate_from_spec
+
+    assert report.swapped_relations == {unit.name: ["power_electrical_relation"]}
+    assert unit.surrogate_power_electrical.fitted is not None
+    assert not hasattr(unit.surrogate_power_electrical, "coefficients")

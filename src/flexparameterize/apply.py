@@ -208,13 +208,14 @@ def _attach_surrogate(unit, registry, surrogate) -> tuple[bool, dict[str, float]
     if surrogate.surrogate_type is not SurrogateType.CONSTANT_INTENSITY:
         surrogate_obj = surrogate_from_spec(surrogate)
         surrogate_block = unit.swap_relation(POWER_ELECTRICAL_RELATION, surrogate_obj)
-        if surrogate_block is not None:
+        coefficients = getattr(surrogate_block, "coefficients", None)
+        if coefficients is not None and hasattr(coefficients, "items"):
             unit.register_surrogate_coefficients(POWER_ELECTRICAL_RELATION)
             for coef_name, coef_value in surrogate.data["coefficients"].items():
-                var = surrogate_block.coefficients[coef_name]
+                var = coefficients[coef_name]
                 var.set_value(coef_value)
                 var.fix()
-        return True, dict(surrogate.data["coefficients"])
+        return True, dict(surrogate.data.get("coefficients", {}))
 
     coefficient = constant_intensity_coefficient(surrogate)
     regressable = {

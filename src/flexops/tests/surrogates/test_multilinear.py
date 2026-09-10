@@ -122,10 +122,10 @@ def test_build_raises_on_a_dimensionally_incompatible_declaration():
 
 @pytest.mark.unit
 def test_build_places_coefficient_vars_on_the_block_with_sanitized_names():
-    """Cross-term keys containing '*' and '.' are sanitized for Pyomo component names.
+    """Coefficient keys are preserved as index entries on an indexed Var.
 
-    The coefficient registry preserves the original spec key, but the Var
-    lives on the block under a sanitized alphanumeric name.
+    No component-name sanitization is needed because each coefficient is an
+    index entry on a single ``coefficient_vars`` ``pyo.Var``.
     """
     _, unit = _unit(has_pressure=True)
     surrogate = MultilinearSurrogate(
@@ -141,9 +141,9 @@ def test_build_places_coefficient_vars_on_the_block_with_sanitized_names():
 
     block, body = surrogate.build(unit, unit.power_electrical)
     assert block is not None
-    assert block.find_component("intercept") is not None
-    assert block.find_component("flow_out_outlet_state_pressure") is not None
-    assert block.find_component("flow_out*outlet_state.pressure") is None
+    assert block.find_component("coefficient_vars") is not None
+    assert block.find_component("intercept") is None
+    assert block.find_component("flow_out_outlet_state_pressure") is None
 
     assert "intercept" in block.coefficients
     assert "flow_out*outlet_state.pressure" in block.coefficients

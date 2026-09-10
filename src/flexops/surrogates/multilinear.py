@@ -6,7 +6,6 @@ what used to be called ``linear`` (no cross terms) and ``bilinear`` (one).
 from typing import ClassVar
 
 import pyomo.environ as pyo
-from pyomo.core.base.label import alphanum_label_from_name
 from pyomo.core.base.units_container import UnitsError
 from pyomo.environ import units as pyunits
 
@@ -116,7 +115,7 @@ class MultilinearSurrogate(Surrogate):
                     f"multilinear surrogate coefficient {key!r} must be a "
                     f"number, got {value!r}.",
                     field="coefficients",
-                    value=value,
+                    value=key,
                 ) from exc
             if key == _INTERCEPT:
                 continue
@@ -162,9 +161,11 @@ class MultilinearSurrogate(Surrogate):
         """Return ``(block, body(t))`` in this surrogate's declared output units.
 
         The returned block is a ``pyo.Block(concrete=True)`` carrying a
-        ``coefficients`` ``CoefficientRegistry`` populated with scalar
-        ``pyo.Var`` objects initialized from the spec data. The block is
-        returned un-added; ``swap_relation`` attaches it to ``unit`` itself.
+        ``coefficient_vars`` indexed ``pyo.Var`` (keyed by coefficient name
+        plus the reserved ``"intercept"`` key) and a ``coefficients``
+        :class:`CoefficientRegistry` facade over that indexed Var. The block
+        is returned un-added; ``swap_relation`` attaches it to ``unit``
+        itself.
 
         Args:
             unit: The unit the relationship is built on.
@@ -187,36 +188,30 @@ class MultilinearSurrogate(Surrogate):
             for name, units in self.input_variables.items()
         }
 
-        coefficients = CoefficientRegistry()
+        coefficients_data = self.data["coefficients"]
+        all_keys = list(coefficients_data.keys())
+        if _INTERCEPT not in all_keys:
+            all_keys.append(_INTERCEPT)
 
-        intercept = self.data["coefficients"].get(_INTERCEPT, 0.0)
-
+        index_set = pyo.Set(initialize=all_keys)
+        coefficient_vars = pyo.Var(index_set, initialize=1.0)
         block = pyo.Block(concrete=True)
-        block.coefficients = coefficients
+        block.coefficient_vars = coefficient_vars
 
-        intercept_var = pyo.Var(initialize=float(intercept))
-        intercept_component_name = alphanum_label_from_name(_INTERCEPT)
-        block.add_component(intercept_component_name, intercept_var)
-        intercept_var.construct()
-        coefficients.register_coefficient(_INTERCEPT, intercept_var)
+        for key in all_keys:
+            value = float(coefficients_data.get(key, 0.0))
+            coefficient_vars[key].set_value(value)
+            coefficient_vars[key].fix()
 
-        for key, value in self.data["coefficients"].items():
-            if key == _INTERCEPT:
-                continue
-            component_name = alphanum_label_from_name(key)
-            block.add_component(component_name, pyo.Var(initialize=float(value)))
-            var = block.find_component(component_name)
-            coefficients.register_coefficient(key, var)
-
-        for _name, var in coefficients.items():
-            var.fix()
+        block.coefficients = CoefficientRegistry()
+        block.coefficients.register_coefficients(coefficient_vars)
 
         def body(t):
-            total = coefficients[_INTERCEPT]
-            for key, _ in self.data["coefficients"].items():
+            total = coefficient_vars[_INTERCEPT]
+            for key, _ in coefficients_data.items():
                 if key == _INTERCEPT:
                     continue
-                term = coefficients[key]
+                term = coefficient_vars[key]
                 for name in key.split("*"):
                     var, units = declared[name]
                     try:

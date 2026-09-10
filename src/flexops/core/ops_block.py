@@ -1044,55 +1044,85 @@ class OpsBlockData(UnitModelBlockData):
         assert record.fitted is not None, "Fitted constraint was not added."
         return record.surrogate_block
 
-    def list_surrogate_blocks(self, relation_name: str) -> list[str]:
-        """Return the local names of every surrogate block ever built for
-        ``relation_name``.
+    def list_surrogate_blocks(self, relation_name: str | None = None) -> list[str]:
+        """Return the local names of every surrogate block ever built.
 
         Args:
-            relation_name: The relation whose surrogate history to inspect.
+            relation_name: If provided, limit the result to surrogate blocks
+                built for this relation. If ``None``, return every surrogate
+                block ever built on this unit, across all relations.
 
         Returns:
             Local names of the surrogate blocks, oldest first. Empty if no
-            surrogate has been swapped for this relation.
+            surrogate has been swapped for the requested relation (or for
+            any relation when ``relation_name`` is ``None``).
 
         Raises:
-            FlexConfigError: If ``relation_name`` is not a registered relation.
+            FlexConfigError: If ``relation_name`` is provided but is not a
+                registered relation.
         """
-        record = next(
-            (r for r in self._io_registry.relations if r.name == relation_name), None
-        )
-        if record is None:
-            raise FlexConfigError(
-                f"{relation_name!r} is not a registered relation on " f"{self.name!r}.",
-                field="relation_name",
-                value=relation_name,
+        if relation_name is not None:
+            record = next(
+                (r for r in self._io_registry.relations if r.name == relation_name),
+                None,
             )
-        return [b.local_name for b in record.surrogate_blocks]
+            if record is None:
+                raise FlexConfigError(
+                    f"{relation_name!r} is not a registered relation on "
+                    f"{self.name!r}.",
+                    field="relation_name",
+                    value=relation_name,
+                )
+            return [b.local_name for b in record.surrogate_blocks]
+        return [
+            b.local_name
+            for record in self._io_registry.relations
+            for b in record.surrogate_blocks
+        ]
 
-    def current_surrogate_block(self, relation_name: str) -> str | None:
-        """Return the local name of the currently active surrogate block, or None.
+    def current_surrogate_block(
+        self, relation_name: str | None = None
+    ) -> str | None | dict[str, str]:
+        """Return the local name of the currently active surrogate block(s).
 
         Args:
-            relation_name: The relation to inspect.
+            relation_name: If provided, return the active block for this
+                relation only. If ``None``, return a mapping of every
+                relation that currently has an active surrogate to its
+                block's local name.
 
         Returns:
-            The active block's local name, or ``None`` if no surrogate is active.
+            The active block's local name, ``None`` if no surrogate is
+            active for the requested relation, or a ``dict`` mapping
+            relation names to active block names when ``relation_name`` is
+            ``None`` and at least one surrogate is active. Returns ``None``
+            when no surrogates are active anywhere on the unit.
 
         Raises:
-            FlexConfigError: If ``relation_name`` is not a registered relation.
+            FlexConfigError: If ``relation_name`` is provided but is not a
+                registered relation.
         """
-        record = next(
-            (r for r in self._io_registry.relations if r.name == relation_name), None
-        )
-        if record is None:
-            raise FlexConfigError(
-                f"{relation_name!r} is not a registered relation on " f"{self.name!r}.",
-                field="relation_name",
-                value=relation_name,
+        if relation_name is not None:
+            record = next(
+                (r for r in self._io_registry.relations if r.name == relation_name),
+                None,
             )
-        if record.surrogate_block is None:
-            return None
-        return record.surrogate_block.local_name
+            if record is None:
+                raise FlexConfigError(
+                    f"{relation_name!r} is not a registered relation on "
+                    f"{self.name!r}.",
+                    field="relation_name",
+                    value=relation_name,
+                )
+            if record.surrogate_block is None:
+                return None
+            return record.surrogate_block.local_name
+        result = {
+            record.name: record.surrogate_block.local_name
+            for record in self._io_registry.relations
+            if record.surrogate_block is not None
+        }
+        return result if result else None
 
     def switch_surrogate_block(self, block_name: str) -> None:
         """Switch to a previously built surrogate block by its local name.
@@ -1132,16 +1162,23 @@ class OpsBlockData(UnitModelBlockData):
 
         (record.fitted if record.fitted is not None else record.constraint).deactivate()
         for component in record.components:
-            getattr(component, "deactivate", lambda: None)()
+            component.deactivate()
 
         block.activate()
 
         record.surrogate_block = block
-        fitted_name = (
-            "fitted" if record.swap_count == 1 else f"fitted_{record.swap_count}"
-        )
-        record.fitted = block.find_component(fitted_name)
+        record.fitted = None
+        for candidate in (
+            "fitted",
+            *(f"fitted_{i}" for i in range(1, record.swap_count + 1)),
+        ):
+            found = block.find_component(candidate)
+            if found is not None:
+                record.fitted = found
+                break
         record.components = [c for c in [block, record.fitted] if c is not None]
+        if record.fitted is not None:
+            record.fitted.activate()
 
         self.register_surrogate_coefficients(record.name)
 
@@ -1206,7 +1243,9 @@ class OpsBlockData(UnitModelBlockData):
 
         registered = []
         for name, var in coefficients.items():
-            self.register_process_parameter(var, regressable=True)
+            self._io_registry.parameters.append(
+                ParameterRecord(param=var, name=name, regressable=True)
+            )
             registered.append(name)
 
         if remove_target:

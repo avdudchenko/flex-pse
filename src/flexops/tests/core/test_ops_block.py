@@ -313,6 +313,38 @@ def test_update_parameters_with_units(dummy_model):
 
 
 @pytest.mark.unit
+def test_update_parameters_surrogate_coefficients():
+    """update_parameters changes registered surrogate coefficient Vars in place.
+
+    After swapping a multilinear surrogate and registering its coefficients,
+    update_parameters must mutate the live VarData entries. The fitted
+    constraint body must see the new values without any rebuild.
+    """
+    _, unit = _flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 2.0, "intercept": 1.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    unit.register_surrogate_coefficients("flow_relation")
+    unit.flow_out[0].set_value(3.0)
+    fitted = unit.surrogate_flow.fitted
+    body_before = pyo.value(fitted[0].body)
+
+    unit.update_parameters({"intercept": 5.0, "flow_out": 0.5})
+
+    assert pyo.value(unit.surrogate_flow.coefficients["intercept"]) == pytest.approx(
+        5.0
+    )
+    assert pyo.value(unit.surrogate_flow.coefficients["flow_out"]) == pytest.approx(0.5)
+    assert fitted[0] is fitted[0]
+    assert pyo.value(fitted[0].body) == pytest.approx(3.0 - (5.0 + 0.5 * 3.0))
+    assert pyo.value(fitted[0].body) != pytest.approx(body_before)
+
+
+@pytest.mark.unit
 def test_register_process_parameter_not_regressable(dummy_model):
     """regressable=False is recorded so FlexParameterize will not fit it."""
     unit = dummy_model.unit
@@ -1145,6 +1177,55 @@ def test_current_surrogate_block_unknown_relation_raises():
 
 
 @pytest.mark.unit
+def test_list_surrogate_blocks_without_relation_returns_all():
+    """Calling list_surrogate_blocks() with no relation returns every block."""
+    _, unit = _flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 1.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 2.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    assert unit.list_surrogate_blocks() == ["surrogate_flow", "surrogate_flow_1"]
+
+
+@pytest.mark.unit
+def test_list_surrogate_blocks_without_relation_returns_empty_when_none():
+    """Calling list_surrogate_blocks() with no surrogates returns []."""
+    _, unit = _flow_relation_unit()
+    assert unit.list_surrogate_blocks() == []
+
+
+@pytest.mark.unit
+def test_current_surrogate_block_without_relation_returns_dict():
+    """Calling current_surrogate_block() with no relation returns active blocks."""
+    _, unit = _flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 1.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    assert unit.current_surrogate_block() == {"flow_relation": "surrogate_flow"}
+
+
+@pytest.mark.unit
+def test_current_surrogate_block_without_relation_returns_none_when_none_active():
+    """Calling current_surrogate_block() with no active surrogates returns None."""
+    _, unit = _flow_relation_unit()
+    assert unit.current_surrogate_block() is None
+
+
+@pytest.mark.unit
 def test_switch_surrogate_block_reactivates_previous():
     """Switching back to a previously built block reactivates it."""
     _, unit = _flow_relation_unit()
@@ -1182,6 +1263,102 @@ def test_switch_surrogate_block_non_surrogate_name_raises():
     _, unit = _flow_relation_unit()
     with pytest.raises(FlexConfigError, match="flow_relation"):
         unit.switch_surrogate_block("flow_relation")
+
+
+@pytest.mark.unit
+def test_switch_surrogate_block_activates_fitted_constraint():
+    """Switching to a block reactivates the block and its fitted Constraint.
+
+    ``block.activate()`` alone does not re-activate a Constraint that was
+    explicitly deactivated when the block was last switched away from, so
+    ``switch_surrogate_block`` must activate the fitted Constraint explicitly.
+    """
+    _, unit = _flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 1.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 2.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+
+    block = unit.surrogate_flow
+    fitted = block.fitted
+    assert not block.active
+    assert not fitted.active
+
+    unit.switch_surrogate_block("surrogate_flow")
+
+    assert block.active
+    assert fitted.active
+
+
+@pytest.mark.unit
+def test_switch_surrogate_block_among_three_preserves_activation():
+    """Three surrogates can be built and switched between freely.
+
+    After each ``swap_relation`` only the newest block is active. After
+    each ``switch_surrogate_block`` exactly that block and its fitted
+    Constraint are active; every previously built surrogate block and
+    fitted Constraint is inactive.
+    """
+    _, unit = _flow_relation_unit()
+
+    specs = [
+        _multilinear(
+            {"flow_out": 1.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+        _multilinear(
+            {"flow_out": 2.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+        _multilinear(
+            {"flow_out": 3.0, "intercept": 0.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    ]
+
+    expected_names = ["surrogate_flow", "surrogate_flow_1", "surrogate_flow_2"]
+
+    for spec in specs:
+        unit.swap_relation("flow_relation", spec)
+
+    all_blocks = [unit.find_component(name) for name in expected_names]
+    all_fitted = [
+        all_blocks[0].find_component("fitted"),
+        all_blocks[1].find_component("fitted_2"),
+        all_blocks[2].find_component("fitted_3"),
+    ]
+
+    assert unit.current_surrogate_block("flow_relation") == "surrogate_flow_2"
+    for block, fitted, name in zip(all_blocks, all_fitted, expected_names, strict=True):
+        if name == "surrogate_flow_2":
+            assert block.active
+            assert fitted.active
+        else:
+            assert not block.active
+            assert not fitted.active
+
+    for expected_name, expected_block, _expected_fitted in zip(
+        expected_names, all_blocks, all_fitted, strict=True
+    ):
+        unit.switch_surrogate_block(expected_name)
+        assert unit.current_surrogate_block("flow_relation") == expected_name
+        for block, fitted in zip(all_blocks, all_fitted, strict=True):
+            if block is expected_block:
+                assert block.active
+                assert fitted.active
+            else:
+                assert not block.active
+                assert not fitted.active
 
 
 @pytest.mark.unit
