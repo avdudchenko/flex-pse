@@ -328,7 +328,6 @@ def test_update_parameters_surrogate_coefficients():
             output_variables={"flow_out": "m^3/hr"},
         ),
     )
-    unit.register_surrogate_coefficients("flow_relation")
     unit.flow_out[0].set_value(3.0)
     fitted = unit.surrogate_flow.fitted
     body_before = pyo.value(fitted[0].body)
@@ -364,7 +363,6 @@ def test_update_parameters_surrogate_coefficients_isolation():
             output_variables={"flow_out": "m^3/hr"},
         ),
     )
-    unit.register_surrogate_coefficients("flow_relation")
 
     unit.swap_relation(
         "secondary_flow_relation",
@@ -374,7 +372,6 @@ def test_update_parameters_surrogate_coefficients_isolation():
             output_variables={"flow_in": "m^3/hr"},
         ),
     )
-    unit.register_surrogate_coefficients("secondary_flow_relation")
 
     # Swap the second relation again so its first surrogate is deactivated.
     unit.swap_relation(
@@ -385,7 +382,6 @@ def test_update_parameters_surrogate_coefficients_isolation():
             output_variables={"flow_in": "m^3/hr"},
         ),
     )
-    unit.register_surrogate_coefficients("secondary_flow_relation")
 
     # Re-register relation 1's coefficients so they are the active ones.
     unit.switch_surrogate_block("surrogate_flow")
@@ -446,7 +442,6 @@ def test_register_surrogate_coefficients_preserves_other_relation_params():
             output_variables={"flow_out": "m^3/hr"},
         ),
     )
-    unit.register_surrogate_coefficients("flow_relation")
 
     unit.swap_relation(
         "secondary_flow_relation",
@@ -456,7 +451,6 @@ def test_register_surrogate_coefficients_preserves_other_relation_params():
             output_variables={"flow_in": "m^3/hr"},
         ),
     )
-    unit.register_surrogate_coefficients("secondary_flow_relation")
 
     by_relation: dict[str, list] = {}
     for p in unit._io_registry.parameters:
@@ -993,6 +987,43 @@ def test_swap_relation_replaces_a_registered_relation():
     assert all(not old[t].active for t in m.time_block.time_index)
     assert fitted is not None
     assert all(fitted[t].active for t in m.time_block.time_index)
+
+
+@pytest.mark.unit
+def test_swap_relation_auto_registers_coefficients():
+    """swap_relation registers the surrogate's coefficients by default."""
+    _, unit = _flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 2.0, "intercept": 1.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+
+    param_names = {p.name for p in unit._io_registry.parameters}
+    assert "intercept" in param_names
+    assert "flow_out" in param_names
+    coef_map = {p.name: p for p in unit._io_registry.parameters}
+    assert coef_map["intercept"].param is unit.surrogate_flow.coefficients["intercept"]
+    assert coef_map["flow_out"].param is unit.surrogate_flow.coefficients["flow_out"]
+
+
+@pytest.mark.unit
+def test_swap_relation_auto_register_opt_out_skips_registration():
+    """auto_register_coefficients=False leaves the registry untouched."""
+    _, unit = _flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 2.0, "intercept": 1.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+        auto_register_coefficients=False,
+    )
+
+    assert not unit._io_registry.parameters
+    assert unit.surrogate_flow.coefficients["intercept"].value == pytest.approx(1.0)
 
 
 @pytest.mark.unit

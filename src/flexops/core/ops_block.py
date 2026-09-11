@@ -883,7 +883,11 @@ class OpsBlockData(UnitModelBlockData):
         )
 
     def swap_relation(
-        self, relation_name: str, surrogate: Surrogate
+        self,
+        relation_name: str,
+        surrogate: Surrogate,
+        *,
+        auto_register_coefficients: bool = True,
     ) -> pyo.Block | None:
         """Replace a registered relationship in place, from a surrogate.
 
@@ -920,6 +924,13 @@ class OpsBlockData(UnitModelBlockData):
         ``surrogate_{relation_base}`` (uniquified on collision) and tracked in
         ``record.surrogate_block`` and ``record.surrogate_blocks``.
 
+        When ``auto_register_coefficients`` is ``True`` (the default),
+        :meth:`register_surrogate_coefficients` is called automatically after
+        the swap, so the new coefficients are immediately visible in the unit's
+        :class:`~flexops.core.registration.IORegistry`. Pass ``False`` when
+        the caller will handle registration itself (e.g. because it must set
+        coefficient values before they become regressable parameters).
+
         Args:
             relation_name: Local name of a relation this unit registered via
                 :meth:`register_relation` (e.g. ``"power_electrical_relation"``,
@@ -927,6 +938,8 @@ class OpsBlockData(UnitModelBlockData):
             surrogate: The :class:`~flexops.surrogates.base.Surrogate` to
                 attach (see
                 :func:`~flexops.surrogates.surrogates.surrogate_from_spec`).
+            auto_register_coefficients: If ``True``, register the new surrogate
+                block's coefficients in the IO registry before returning.
 
         Returns:
             The surrogate sub-block (or ``None`` if the surrogate needs no
@@ -1042,6 +1055,12 @@ class OpsBlockData(UnitModelBlockData):
         record.components = new_components
 
         assert record.fitted is not None, "Fitted constraint was not added."
+
+        if auto_register_coefficients and surrogate_block is not None:
+            coefficients = getattr(surrogate_block, "coefficients", None)
+            if coefficients is not None and hasattr(coefficients, "items"):
+                self.register_surrogate_coefficients(relation_name)
+
         return record.surrogate_block
 
     def list_surrogate_blocks(self, relation_name: str | None = None) -> list[str]:

@@ -270,3 +270,27 @@ def test_apply_surrogate_without_coefficients_skips_registry():
     assert report.swapped_relations == {unit.name: ["power_electrical_relation"]}
     assert unit.surrogate_power_electrical.fitted is not None
     assert not hasattr(unit.surrogate_power_electrical, "coefficients")
+
+
+@pytest.mark.component
+def test_apply_surrogate_idempotent_on_second_call():
+    """Calling apply_to_model twice with the same surrogate does not duplicate
+    coefficient ParameterRecords in the unit's IO registry.
+    """
+    m, unit = build_plant()
+    data = evaluate_data(unit)
+    unit.energy_intensity.unfix()
+
+    spec = _multilinear_spec(INTENSITY)
+
+    first_report = apply_to_model(m, data, ALIASED, surrogates={unit.name: spec})
+    assert first_report.swapped_relations == {unit.name: ["power_electrical_relation"]}
+    param_count_after_first = len(unit._io_registry.parameters)
+
+    second_report = apply_to_model(m, data, ALIASED, surrogates={unit.name: spec})
+    assert second_report.swapped_relations == {unit.name: ["power_electrical_relation"]}
+    assert len(unit._io_registry.parameters) == param_count_after_first
+
+    param_names = [p.name for p in unit._io_registry.parameters]
+    assert param_names.count("flow_in") == 1
+    assert param_names.count("intercept") == 1

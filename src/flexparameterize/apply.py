@@ -210,7 +210,13 @@ def _attach_surrogate(unit, registry, surrogate) -> tuple[bool, dict[str, float]
         surrogate_block = unit.swap_relation(POWER_ELECTRICAL_RELATION, surrogate_obj)
         coefficients = getattr(surrogate_block, "coefficients", None)
         if coefficients is not None and hasattr(coefficients, "items"):
-            unit.register_surrogate_coefficients(POWER_ELECTRICAL_RELATION)
+            coef_names = {name for name, _ in coefficients.items()}
+            already_registered = any(
+                p.relation_name == POWER_ELECTRICAL_RELATION and p.name in coef_names
+                for p in unit._io_registry.parameters
+            )
+            if not already_registered:
+                unit.register_surrogate_coefficients(POWER_ELECTRICAL_RELATION)
             for coef_name, coef_value in surrogate.data["coefficients"].items():
                 var = coefficients[coef_name]
                 var.set_value(coef_value)
