@@ -186,11 +186,15 @@ class ParameterRecord:
         param: The live Pyomo ``Param`` or ``Var``.
         name: The parameter's local name on its unit block.
         regressable: Whether FlexParameterize may fit this parameter.
+        relation_name: The relation this parameter belongs to, or ``None`` for
+            unit-level process parameters that are not tied to a specific
+            swapped relation.
     """
 
     param: Any
     name: str
     regressable: bool
+    relation_name: str | None = None
 
 
 @dataclass

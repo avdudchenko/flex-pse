@@ -1238,13 +1238,17 @@ class OpsBlockData(UnitModelBlockData):
 
         names = {name for name, _ in coefficients.items()}
         self._io_registry.parameters = [
-            p for p in self._io_registry.parameters if p.name not in names
+            p
+            for p in self._io_registry.parameters
+            if p.relation_name != relation_name or p.name not in names
         ]
 
         registered = []
         for name, var in coefficients.items():
             self._io_registry.parameters.append(
-                ParameterRecord(param=var, name=name, regressable=True)
+                ParameterRecord(
+                    param=var, name=name, regressable=True, relation_name=relation_name
+                )
             )
             registered.append(name)
 

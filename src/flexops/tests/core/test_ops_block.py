@@ -432,6 +432,50 @@ def test_update_parameters_surrogate_coefficients_isolation():
 
 
 @pytest.mark.unit
+def test_register_surrogate_coefficients_preserves_other_relation_params():
+    """Registering coefficients for one relation does not drop another relation's
+    parameters from the unit registry when both surrogates share coefficient
+    names.
+    """
+    _, unit = _two_flow_relation_unit()
+
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 2.0, "intercept": 1.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    unit.register_surrogate_coefficients("flow_relation")
+
+    unit.swap_relation(
+        "secondary_flow_relation",
+        _multilinear(
+            {"flow_out": 2.0, "intercept": 1.0},
+            input_variables={"flow_out": "m^3/hr"},
+            output_variables={"flow_in": "m^3/hr"},
+        ),
+    )
+    unit.register_surrogate_coefficients("secondary_flow_relation")
+
+    by_relation: dict[str, list] = {}
+    for p in unit._io_registry.parameters:
+        by_relation.setdefault(p.relation_name or "<unit>", []).append(p.name)
+
+    assert by_relation["flow_relation"] == ["flow_out", "intercept"]
+    assert by_relation["secondary_flow_relation"] == ["flow_out", "intercept"]
+
+    coef_map = {p.name: p for p in unit._io_registry.parameters}
+    secondary = unit.surrogate_secondary_flow.coefficients
+    assert coef_map["intercept"].param is secondary["intercept"]
+    assert coef_map["flow_out"].param is secondary["flow_out"]
+
+    flow_block = unit.surrogate_flow
+    flow_coef_ids = {id(var) for _, var in flow_block.coefficients.items()}
+    assert id(coef_map["intercept"].param) not in flow_coef_ids
+
+
+@pytest.mark.unit
 def test_register_process_parameter_not_regressable(dummy_model):
     """regressable=False is recorded so FlexParameterize will not fit it."""
     unit = dummy_model.unit
