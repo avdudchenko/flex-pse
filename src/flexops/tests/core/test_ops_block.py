@@ -345,6 +345,93 @@ def test_update_parameters_surrogate_coefficients():
 
 
 @pytest.mark.unit
+def test_update_parameters_surrogate_coefficients_isolation():
+    """Updating one surrogate's coefficients does not affect a deactivated
+    surrogate that shares the same coefficient names.
+
+    Verifies that coefficient Vars are unique per surrogate block, that
+    relation records preserve their surrogate block histories, and that the
+    active surrogate's coefficients are the ones reachable via the parameter
+    registry.
+    """
+    _, unit = _two_flow_relation_unit()
+
+    # Swap both relations with multilinear surrogates that share coefficient names.
+    unit.swap_relation(
+        "flow_relation",
+        _multilinear(
+            {"flow_out": 2.0, "intercept": 1.0},
+            output_variables={"flow_out": "m^3/hr"},
+        ),
+    )
+    unit.register_surrogate_coefficients("flow_relation")
+
+    unit.swap_relation(
+        "secondary_flow_relation",
+        _multilinear(
+            {"flow_out": 2.0, "intercept": 1.0},
+            input_variables={"flow_out": "m^3/hr"},
+            output_variables={"flow_in": "m^3/hr"},
+        ),
+    )
+    unit.register_surrogate_coefficients("secondary_flow_relation")
+
+    # Swap the second relation again so its first surrogate is deactivated.
+    unit.swap_relation(
+        "secondary_flow_relation",
+        _multilinear(
+            {"flow_out": 3.0, "intercept": 4.0},
+            input_variables={"flow_out": "m^3/hr"},
+            output_variables={"flow_in": "m^3/hr"},
+        ),
+    )
+    unit.register_surrogate_coefficients("secondary_flow_relation")
+
+    # Re-register relation 1's coefficients so they are the active ones.
+    unit.switch_surrogate_block("surrogate_flow")
+
+    # Snapshot the deactivated first surrogate for relation 2.
+    block_deactivated = unit.find_component("surrogate_secondary_flow")
+    assert block_deactivated is not None
+    deactivated_coefs_before = {
+        name: pyo.value(var) for name, var in block_deactivated.coefficients.items()
+    }
+
+    # Update parameters on the active surrogate.
+    unit.update_parameters({"intercept": 5.0, "flow_out": 0.5})
+
+    # Active surrogate's coefficients changed.
+    assert pyo.value(unit.surrogate_flow.coefficients["intercept"]) == pytest.approx(
+        5.0
+    )
+    assert pyo.value(unit.surrogate_flow.coefficients["flow_out"]) == pytest.approx(0.5)
+
+    # Deactivated surrogate's coefficients are untouched.
+    for name, var in block_deactivated.coefficients.items():
+        assert pyo.value(var) == pytest.approx(deactivated_coefs_before[name])
+
+    # Relation records are preserved with full surrogate block histories.
+    records = {r.name: r for r in unit._io_registry.relations}
+    assert "flow_relation" in records
+    assert "secondary_flow_relation" in records
+    assert len(records["flow_relation"].surrogate_blocks) == 1
+    assert len(records["secondary_flow_relation"].surrogate_blocks) == 2
+
+    # Each surrogate block owns its own unique coefficient Vars.
+    block_active = unit.surrogate_flow
+    block_active_2 = unit.find_component("surrogate_secondary_flow_1")
+    assert block_active_2 is not None
+    coef_ids_1 = {id(var) for _, var in block_active.coefficients.items()}
+    coef_ids_deactivated = {
+        id(var) for _, var in block_deactivated.coefficients.items()
+    }
+    coef_ids_active_2 = {id(var) for _, var in block_active_2.coefficients.items()}
+    assert coef_ids_1.isdisjoint(coef_ids_deactivated)
+    assert coef_ids_1.isdisjoint(coef_ids_active_2)
+    assert coef_ids_deactivated.isdisjoint(coef_ids_active_2)
+
+
+@pytest.mark.unit
 def test_register_process_parameter_not_regressable(dummy_model):
     """regressable=False is recorded so FlexParameterize will not fit it."""
     unit = dummy_model.unit
@@ -780,6 +867,39 @@ def _flow_relation_unit():
         return flow_out[t] == 10.0
 
     m.unit.register_relation(m.unit.flow_relation, target=flow_out)
+    return m, m.unit
+
+
+def _two_flow_relation_unit():
+    """A bare unit carrying two registered, swappable non-power relations.
+
+    Both relations use ``flow_out`` as their surrogate's input variable, so
+    their multilinear surrogates share the same coefficient names. This lets
+    us verify that ``update_parameters`` on one surrogate does not mutate the
+    coefficient Vars of a deactivated surrogate on the same unit.
+    """
+    m = _model(4)
+    m.unit = OpsBlock(property_package=m.props, allow_pass_through=False)
+    m.unit.add_stream_ports()
+    m.unit.add_component(
+        "flow_out", pyo.Reference(m.unit.outlet_state.flow_vol_phase[:, "Liq"])
+    )
+    m.unit.add_component(
+        "flow_in", pyo.Reference(m.unit.inlet_state.flow_vol_phase[:, "Liq"])
+    )
+    flow_out = m.unit.flow_out
+    flow_in = m.unit.flow_in
+
+    @m.unit.Constraint(m.time_block.time_index)
+    def flow_relation(b, t):
+        return flow_out[t] == 10.0
+
+    @m.unit.Constraint(m.time_block.time_index)
+    def secondary_flow_relation(b, t):
+        return flow_in[t] == 5.0
+
+    m.unit.register_relation(m.unit.flow_relation, target=flow_out)
+    m.unit.register_relation(m.unit.secondary_flow_relation, target=flow_in)
     return m, m.unit
 
 
