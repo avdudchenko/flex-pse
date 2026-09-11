@@ -85,7 +85,9 @@ def test_recovery_relation_is_swappable():
     assert m.unit.split_definition[0].active is False
     assert m.unit.split_mass_balance[0].active is True
     # permeate - (0.3 + 0.01*10 + 1e-6*3e5 + 1e-7*10*3e5) == -(0.3+0.1+0.3+0.3)
-    assert pyo.value(m.unit.split_definition_fitted[0].body) == pytest.approx(-1.0)
+    assert pyo.value(m.unit.surrogate_split_definition.fitted[0].body) == pytest.approx(
+        -1.0
+    )
 
 
 @pytest.mark.unit

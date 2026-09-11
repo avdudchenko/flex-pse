@@ -504,7 +504,7 @@ def test_combustor_swaps_its_relation_from_a_config_surrogate():
     _, unit = _combustor(3, inlet_names=("fuel",), flexops_config=_surrogate_config())
     assert not unit.power_electrical_relation[0].active
     assert unit.power_electrical_sign[0].active
-    fitted = unit.find_component("power_electrical_relation_fitted")
+    fitted = unit.surrogate_power_electrical.fitted
     assert fitted is not None
     assert fitted[0].active
 
@@ -513,7 +513,7 @@ def test_combustor_swaps_its_relation_from_a_config_surrogate():
 def test_combustor_swapped_relation_feeds_the_magnitude():
     """The fitted body determines ``power_generated``; the sign makes it an export."""
     _, unit = _combustor(3, inlet_names=("fuel",), flexops_config=_surrogate_config())
-    fitted = unit.power_electrical_relation_fitted
+    fitted = unit.surrogate_power_electrical.fitted
     for t in range(3):
         _fix(unit, "flow_in_fuel", t, 1.0)
         unit.power_generated[t].fix(_INTERCEPT + _SLOPE)

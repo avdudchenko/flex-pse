@@ -120,4 +120,4 @@ def test_pump_energy_relation_is_swappable():
     )
 
     assert m.unit.power_electrical_relation[0].active is False
-    assert m.unit.find_component("power_electrical_relation_fitted") is not None
+    assert m.unit.surrogate_power_electrical.fitted is not None

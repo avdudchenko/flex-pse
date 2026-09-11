@@ -82,7 +82,7 @@ def test_linear_fit_emit_rebuild_predictions(tmp_path):
         rebuilt.outlet_state.pressure[0].set_value(pressure)
         rebuilt.power_electrical[0].set_value(0.0)
         assert pyo.value(
-            rebuilt.power_electrical_relation_fitted[0].body
+            rebuilt.surrogate_power_electrical.fitted[0].body
         ) == pytest.approx(-_predicted(regressor, flow, pressure), rel=1e-6)
 
 
@@ -101,5 +101,5 @@ def test_linear_surrogate_spec_applies_in_place():
         unit.outlet_state.pressure[0].set_value(pressure)
         unit.power_electrical[0].set_value(0.0)
         assert pyo.value(
-            unit.power_electrical_relation_fitted[0].body
+            unit.surrogate_power_electrical.fitted[0].body
         ) == pytest.approx(-_predicted(regressor, flow, pressure), rel=1e-6)

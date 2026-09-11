@@ -444,8 +444,8 @@ def test_digestor_swaps_biogas_relation_with_linear_surrogate():
 
     assert unit.find_component("biogas_relation") is not None
     assert not unit.biogas_relation.active
-    assert unit.find_component("biogas_relation_fitted") is not None
-    assert unit.biogas_relation_fitted.active
+    assert unit.surrogate_biogas.fitted is not None
+    assert unit.surrogate_biogas.fitted.active
 
 
 @pytest.mark.unit
