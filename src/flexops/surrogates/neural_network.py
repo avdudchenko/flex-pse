@@ -1,6 +1,6 @@
 """NeuralNetworkSurrogate: not yet implemented."""
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from flexcore.config.schema import SurrogateType
 from flexops.surrogates.base import Surrogate
@@ -38,6 +38,6 @@ class NeuralNetworkSurrogate(Surrogate):
         """Never reached -- ``_validate`` always raises first."""
         raise NotImplementedError
 
-    def build(self, unit, target):
+    def build(self, unit, target) -> tuple[None, Any]:
         """Never reached -- ``_validate`` always raises first."""
         raise NotImplementedError

@@ -882,7 +882,13 @@ class OpsBlockData(UnitModelBlockData):
             )
         )
 
-    def swap_relation(self, relation_name: str, surrogate: Surrogate) -> None:
+    def swap_relation(
+        self,
+        relation_name: str,
+        surrogate: Surrogate,
+        *,
+        auto_register_coefficients: bool = True,
+    ) -> pyo.Block | None:
         """Replace a registered relationship in place, from a surrogate.
 
         Deactivates the named relation (never deletes it),
@@ -897,9 +903,11 @@ class OpsBlockData(UnitModelBlockData):
         ``surrogate`` (a :class:`~flexops.surrogates.base.Surrogate`, e.g.
         :class:`~flexops.surrogates.multilinear.MultilinearSurrogate`) is
         already validated; :meth:`~flexops.surrogates.base.Surrogate.build`
-        does the rest — it returns ``body(t)``, a units-carrying Pyomo
-        expression in the surrogate's own declared output units for that time
-        point, or ``pyomo.environ.Constraint.Skip`` to omit it (a
+        does the rest — it returns ``(block, body(t))``, where ``block`` is a
+        Pyomo Block carrying the surrogate's coefficient Vars (or ``None`` if
+        the surrogate needs no auxiliary Vars), and ``body`` is a units-carrying
+        Pyomo expression in the surrogate's own declared output units for that
+        time point, or ``pyomo.environ.Constraint.Skip`` to omit it (a
         lagged/state-space form uses this to skip horizon points where its lag
         does not exist). ``body`` is converted into the registered target's
         own units here, so a surrogate fitted in one unit basis attaches
@@ -910,6 +918,19 @@ class OpsBlockData(UnitModelBlockData):
         relationship shape is a new class in ``flexops.surrogates``, never a
         config-schema change.
 
+        The fitted constraint is placed on the surrogate block itself when one
+        is returned, so deactivating the block turns off the entire surrogate
+        layer in one step. The block is named
+        ``surrogate_{relation_base}`` (uniquified on collision) and tracked in
+        ``record.surrogate_block`` and ``record.surrogate_blocks``.
+
+        When ``auto_register_coefficients`` is ``True`` (the default),
+        :meth:`register_surrogate_coefficients` is called automatically after
+        the swap, so the new coefficients are immediately visible in the unit's
+        :class:`~flexops.core.registration.IORegistry`. Pass ``False`` when
+        the caller will handle registration itself (e.g. because it must set
+        coefficient values before they become regressable parameters).
+
         Args:
             relation_name: Local name of a relation this unit registered via
                 :meth:`register_relation` (e.g. ``"power_electrical_relation"``,
@@ -917,6 +938,12 @@ class OpsBlockData(UnitModelBlockData):
             surrogate: The :class:`~flexops.surrogates.base.Surrogate` to
                 attach (see
                 :func:`~flexops.surrogates.surrogates.surrogate_from_spec`).
+            auto_register_coefficients: If ``True``, register the new surrogate
+                block's coefficients in the IO registry before returning.
+
+        Returns:
+            The surrogate sub-block (or ``None`` if the surrogate needs no
+            auxiliary Vars).
 
         Raises:
             FlexConfigError: If ``relation_name`` was never registered, or a
@@ -945,14 +972,33 @@ class OpsBlockData(UnitModelBlockData):
                 deactivate()
 
         before = set(self.component_map())
-        body = surrogate.build(self, record.target)
-        record.components = [
-            self.find_component(name) for name in set(self.component_map()) - before
-        ]
+        surrogate_block, body = surrogate.build(self, record.target)
+
+        base_name = f"surrogate_{relation_name.replace('_relation', '')}"
+        block_name = base_name
+        counter = 1
+        while self.find_component(block_name) is not None:
+            block_name = f"{base_name}_{counter}"
+            counter += 1
+
+        legacy_aux_components: list = []
+        if surrogate_block is not None:
+            self.add_component(block_name, surrogate_block)
+            record.surrogate_blocks.append(surrogate_block)
+            record.surrogate_block = surrogate_block
+            block_component = surrogate_block
+        else:
+            record.surrogate_block = None
+            block_component = None
+            legacy_aux_components = [
+                self.find_component(name) for name in set(self.component_map()) - before
+            ]
 
         record.swap_count += 1
-        suffix = "" if record.swap_count == 1 else f"_{record.swap_count}"
-        fitted_name = f"{relation_name}_fitted{suffix}"
+        fitted_name = (
+            "fitted" if record.swap_count == 1 else f"fitted_{record.swap_count}"
+        )
+
         target = record.target
 
         def _rule(b, t, _body=body, _target=target):
@@ -970,18 +1016,380 @@ class OpsBlockData(UnitModelBlockData):
                 ) from exc
             return _target[t] == converted
 
-        self.add_component(
-            fitted_name,
-            pyo.Constraint(
-                target.index_set(),
-                rule=_rule,
-                doc=f"Fitted relationship ({type(surrogate).__name__}), "
-                f"replacing the deactivated {relation_name}. The surrogate's "
-                f"own output units are converted into {target.local_name!r}'s.",
-            ),
+        if surrogate_block is not None:
+            surrogate_block.add_component(
+                fitted_name,
+                pyo.Constraint(
+                    target.index_set(),
+                    rule=_rule,
+                    doc=f"Fitted relationship ({type(surrogate).__name__}), "
+                    f"replacing the deactivated {relation_name}. The surrogate's "
+                    f"own output units are converted into {target.local_name!r}'s.",
+                ),
+            )
+            record.fitted = surrogate_block.find_component(fitted_name)
+            surrogate_block.body = body
+        else:
+            suffix = "" if record.swap_count == 1 else f"_{record.swap_count}"
+            fitted_name_full = f"{relation_name}_fitted{suffix}"
+            self.add_component(
+                fitted_name_full,
+                pyo.Constraint(
+                    target.index_set(),
+                    rule=_rule,
+                    doc=f"Fitted relationship ({type(surrogate).__name__}), "
+                    f"replacing the deactivated {relation_name}.",
+                ),
+            )
+            record.fitted = self.find_component(fitted_name_full)
+
+        new_components = [
+            c
+            for c in [
+                block_component,
+                record.fitted,
+                *legacy_aux_components,
+            ]
+            if c is not None
+        ]
+        record.components = new_components
+
+        assert record.fitted is not None, "Fitted constraint was not added."
+
+        if auto_register_coefficients and surrogate_block is not None:
+            coefficients = getattr(surrogate_block, "coefficients", None)
+            if coefficients is not None and hasattr(coefficients, "items"):
+                self.register_surrogate_coefficients(relation_name)
+
+        return record.surrogate_block
+
+    def list_surrogate_blocks(self, relation_name: str | None = None) -> list[str]:
+        """Return the local names of every surrogate block ever built.
+
+        Args:
+            relation_name: If provided, limit the result to surrogate blocks
+                built for this relation. If ``None``, return every surrogate
+                block ever built on this unit, across all relations.
+
+        Returns:
+            Local names of the surrogate blocks, oldest first. Empty if no
+            surrogate has been swapped for the requested relation (or for
+            any relation when ``relation_name`` is ``None``).
+
+        Raises:
+            FlexConfigError: If ``relation_name`` is provided but is not a
+                registered relation.
+        """
+        if relation_name is not None:
+            record = next(
+                (r for r in self._io_registry.relations if r.name == relation_name),
+                None,
+            )
+            if record is None:
+                raise FlexConfigError(
+                    f"{relation_name!r} is not a registered relation on "
+                    f"{self.name!r}.",
+                    field="relation_name",
+                    value=relation_name,
+                )
+            return [b.local_name for b in record.surrogate_blocks]
+        return [
+            b.local_name
+            for record in self._io_registry.relations
+            for b in record.surrogate_blocks
+        ]
+
+    def current_surrogate_block(
+        self, relation_name: str | None = None
+    ) -> str | None | dict[str, str]:
+        """Return the local name of the currently active surrogate block(s).
+
+        Args:
+            relation_name: If provided, return the active block for this
+                relation only. If ``None``, return a mapping of every
+                relation that currently has an active surrogate to its
+                block's local name.
+
+        Returns:
+            The active block's local name, ``None`` if no surrogate is
+            active for the requested relation, or a ``dict`` mapping
+            relation names to active block names when ``relation_name`` is
+            ``None`` and at least one surrogate is active. Returns ``None``
+            when no surrogates are active anywhere on the unit.
+
+        Raises:
+            FlexConfigError: If ``relation_name`` is provided but is not a
+                registered relation.
+        """
+        if relation_name is not None:
+            record = next(
+                (r for r in self._io_registry.relations if r.name == relation_name),
+                None,
+            )
+            if record is None:
+                raise FlexConfigError(
+                    f"{relation_name!r} is not a registered relation on "
+                    f"{self.name!r}.",
+                    field="relation_name",
+                    value=relation_name,
+                )
+            if record.surrogate_block is None:
+                return None
+            return record.surrogate_block.local_name
+        result = {
+            record.name: record.surrogate_block.local_name
+            for record in self._io_registry.relations
+            if record.surrogate_block is not None
+        }
+        return result if result else None
+
+    def switch_surrogate_block(self, block_name: str) -> None:
+        """Switch to a previously built surrogate block by its local name.
+
+        Looks up the block on this unit by name, finds the ``RelationRecord``
+        it belongs to, deactivates whatever is currently active for that
+        relation, activates the named block, updates ``record.surrogate_block``
+        to point to it, and re-registers its coefficients as regressable
+        parameters.
+
+        Args:
+            block_name: The local name of the surrogate block to activate
+                (e.g. ``"surrogate_power"`` or ``"surrogate_power_1"``).
+
+        Raises:
+            FlexConfigError: If ``block_name`` is not found on this unit, or
+                is not a surrogate block.
+        """
+        block = self.find_component(block_name)
+        if block is None:
+            raise FlexConfigError(
+                f"Block {block_name!r} not found on {self.name!r}.",
+                field="block_name",
+                value=block_name,
+            )
+
+        record = next(
+            (r for r in self._io_registry.relations if block in r.surrogate_blocks),
+            None,
         )
-        record.fitted = self.find_component(fitted_name)
-        assert record.fitted is not None, "Fitted constraint was not added to the unit."
+        if record is None:
+            raise FlexConfigError(
+                f"Block {block_name!r} is not a surrogate block on " f"{self.name!r}.",
+                field="block_name",
+                value=block_name,
+            )
+
+        (record.fitted if record.fitted is not None else record.constraint).deactivate()
+        for component in record.components:
+            component.deactivate()
+
+        block.activate()
+
+        record.surrogate_block = block
+        record.fitted = None
+        for candidate in (
+            "fitted",
+            *(f"fitted_{i}" for i in range(1, record.swap_count + 1)),
+        ):
+            found = block.find_component(candidate)
+            if found is not None:
+                record.fitted = found
+                break
+        record.components = [c for c in [block, record.fitted] if c is not None]
+        if record.fitted is not None:
+            record.fitted.activate()
+
+        self.register_surrogate_coefficients(record.name)
+
+    def register_surrogate_coefficients(
+        self,
+        relation_name: str,
+        *,
+        remove_target: bool = True,
+    ) -> list[str]:
+        """Register a swapped surrogate's coefficient Vars as regressable parameters.
+
+        After :meth:`swap_relation` attaches a surrogate to ``relation_name``, call
+        this to (a) register each coefficient Var in the unit's ``IORegistry`` as a
+        regressable process parameter, and (b) remove the relation's performance
+        target from the parameter list so it is not regressed against alongside the
+        coefficients.
+
+        The surrogate block's ``coefficients`` attribute is a
+        ``CoefficientRegistry`` whose ``items()`` yields ``(name, Var)``
+        pairs. Any object with an ``items()`` method returning ``(str, pyo.Var)``
+        pairs is accepted.
+
+        Args:
+            relation_name: The relation whose surrogate coefficients to register.
+            remove_target: If True, remove ``record.target`` from the parameters
+                list (it is a performance output, not a regressable input).
+
+        Returns:
+            The local names of the registered coefficient parameters.
+        """
+        record = next(
+            (r for r in self._io_registry.relations if r.name == relation_name), None
+        )
+        if record is None:
+            raise FlexConfigError(
+                f"{relation_name!r} is not a registered relation on " f"{self.name!r}.",
+                field="relation_name",
+                value=relation_name,
+            )
+        if record.surrogate_block is None:
+            raise FlexConfigError(
+                f"{relation_name!r} on {self.name!r} has no surrogate block; "
+                "call swap_relation first.",
+                field="relation_name",
+                value=relation_name,
+            )
+
+        block = record.surrogate_block
+        coefficients = getattr(block, "coefficients", None)
+        if coefficients is None or not hasattr(coefficients, "items"):
+            raise FlexConfigError(
+                f"Surrogate block on {relation_name!r} has no 'coefficients' "
+                f"registry (expected a CoefficientRegistry or dict-like).",
+                field="relation_name",
+                value=relation_name,
+            )
+
+        names = {name for name, _ in coefficients.items()}
+        self._io_registry.parameters = [
+            p
+            for p in self._io_registry.parameters
+            if p.relation_name != relation_name or p.name not in names
+        ]
+
+        registered = []
+        for name, var in coefficients.items():
+            self._io_registry.parameters.append(
+                ParameterRecord(
+                    param=var, name=name, regressable=True, relation_name=relation_name
+                )
+            )
+            registered.append(name)
+
+        if remove_target:
+            target = record.target
+            self._io_registry.parameters = [
+                p for p in self._io_registry.parameters if id(p.param) != id(target)
+            ]
+
+        return registered
+
+    def unfix_surrogate_coefficients(self, relation_name: str | None = None) -> None:
+        """Unfix all coefficient Vars in the active surrogate block(s).
+
+        After calling, the coefficients are free variables again and a solve
+        can adjust them. Call :meth:`fix_surrogate_coefficients` to re-fix
+        them at their current values after the solve.
+
+        Args:
+            relation_name: The relation whose coefficients to unfix. If
+                ``None``, every relation on this unit that currently has an
+                active surrogate block is operated on.
+
+        Raises:
+            FlexConfigError: If ``relation_name`` is provided but is not
+                registered or has no active surrogate block.
+        """
+        if relation_name is not None:
+            records = [
+                next(
+                    (r for r in self._io_registry.relations if r.name == relation_name),
+                    None,
+                )
+            ]
+            if records[0] is None:
+                raise FlexConfigError(
+                    f"{relation_name!r} is not a registered relation on "
+                    f"{self.name!r}.",
+                    field="relation_name",
+                    value=relation_name,
+                )
+        else:
+            records = [
+                r for r in self._io_registry.relations if r.surrogate_block is not None
+            ]
+            if not records:
+                raise FlexConfigError(
+                    f"{self.name!r} has no active surrogate blocks; call "
+                    "swap_relation first.",
+                    field="relation_name",
+                    value=None,
+                )
+
+        for record in records:
+            if record.surrogate_block is None:
+                if relation_name is not None:
+                    raise FlexConfigError(
+                        f"{record.name!r} on {self.name!r} has no active "
+                        "surrogate block; call swap_relation first.",
+                        field="relation_name",
+                        value=record.name,
+                    )
+                continue
+            coefficients = getattr(record.surrogate_block, "coefficients", None)
+            if coefficients is not None:
+                coefficients.unfix()
+
+    def fix_surrogate_coefficients(self, relation_name: str | None = None) -> None:
+        """Fix all coefficient Vars in the active surrogate block(s) at their
+        current values.
+
+        This is the counterpart to :meth:`unfix_surrogate_coefficients`. After
+        solving, call this to lock the coefficients at their solved values.
+
+        Args:
+            relation_name: The relation whose coefficients to fix. If
+                ``None``, every relation on this unit that currently has an
+                active surrogate block is operated on.
+
+        Raises:
+            FlexConfigError: If ``relation_name`` is provided but is not
+                registered or has no active surrogate block.
+        """
+        if relation_name is not None:
+            records = [
+                next(
+                    (r for r in self._io_registry.relations if r.name == relation_name),
+                    None,
+                )
+            ]
+            if records[0] is None:
+                raise FlexConfigError(
+                    f"{relation_name!r} is not a registered relation on "
+                    f"{self.name!r}.",
+                    field="relation_name",
+                    value=relation_name,
+                )
+        else:
+            records = [
+                r for r in self._io_registry.relations if r.surrogate_block is not None
+            ]
+            if not records:
+                raise FlexConfigError(
+                    f"{self.name!r} has no active surrogate blocks; call "
+                    "swap_relation first.",
+                    field="relation_name",
+                    value=None,
+                )
+
+        for record in records:
+            if record.surrogate_block is None:
+                if relation_name is not None:
+                    raise FlexConfigError(
+                        f"{record.name!r} on {self.name!r} has no active "
+                        "surrogate block; call swap_relation first.",
+                        field="relation_name",
+                        value=record.name,
+                    )
+                continue
+            coefficients = getattr(record.surrogate_block, "coefficients", None)
+            if coefficients is not None:
+                coefficients.fix()
 
     # -- in-place parameter updates (FlexParameterize 2-way) ----------------
 

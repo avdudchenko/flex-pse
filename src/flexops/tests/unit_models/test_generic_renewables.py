@@ -183,7 +183,7 @@ def test_generic_renewables_swapped_relation_feeds_the_magnitude():
 
     assert not unit.power_electrical_relation[0].active
     assert unit.power_electrical_sign[0].active
-    fitted = unit.power_electrical_relation_fitted
+    fitted = unit.surrogate_power_electrical.fitted
     for t in range(3):
         unit.irradiance[t].fix(0.5)
         unit.power_generated[t].fix(_INTERCEPT + 0.5 * _SLOPE)

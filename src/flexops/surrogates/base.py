@@ -9,7 +9,7 @@ of :meth:`Surrogate.build`.
 """
 
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from flexcore.config.schema import SurrogateType
 
@@ -62,8 +62,8 @@ class Surrogate(ABC):
         """Return this relationship's output variable names and declared units."""
 
     @abstractmethod
-    def build(self, unit, target):
-        """Return ``body(t)`` evaluating this relationship at time ``t``.
+    def build(self, unit, target) -> tuple[Any | None, Any]:
+        """Return ``(block, body(t))`` evaluating this relationship at time ``t``.
 
         Args:
             unit: The :class:`~flexops.core.ops_block.OpsBlockData` the
@@ -72,9 +72,13 @@ class Surrogate(ABC):
             target: The Var/Reference the relationship determines.
 
         Returns:
-            A callable taking a time index and returning a units-carrying
-            Pyomo expression in this relationship's declared output units, or
-            ``pyomo.environ.Constraint.Skip`` to omit that index. May attach
-            auxiliary Vars/Constraints to ``unit``; ``swap_relation`` finds
-            and tracks them itself.
+            A tuple ``(block, body)`` where ``block`` is a Pyomo ``Block`` the
+            surrogate constructs (or ``None`` if this surrogate needs no
+            auxiliary Vars). ``swap_relation`` adds the block to ``unit``
+            itself; this method must not touch ``unit.add_component``.
+            ``body`` is a callable taking a time index and returning a
+            units-carrying Pyomo expression in this relationship's declared
+            output units, or ``pyomo.environ.Constraint.Skip`` to omit that
+            index. May attach auxiliary Vars/Constraints to ``unit``;
+            ``swap_relation`` finds and tracks them itself.
         """

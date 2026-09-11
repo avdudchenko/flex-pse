@@ -5,11 +5,13 @@ what used to be called ``linear`` (no cross terms) and ``bilinear`` (one).
 
 from typing import ClassVar
 
+import pyomo.environ as pyo
 from pyomo.core.base.units_container import UnitsError
 from pyomo.environ import units as pyunits
 
 from flexcore.config.schema import SurrogateType
 from flexcore.exceptions import FlexConfigError
+from flexops.core.registration import CoefficientRegistry
 from flexops.core.units import parse_units
 from flexops.surrogates.base import Surrogate
 
@@ -113,7 +115,7 @@ class MultilinearSurrogate(Surrogate):
                     f"multilinear surrogate coefficient {key!r} must be a "
                     f"number, got {value!r}.",
                     field="coefficients",
-                    value=value,
+                    value=key,
                 ) from exc
             if key == _INTERCEPT:
                 continue
@@ -156,7 +158,13 @@ class MultilinearSurrogate(Surrogate):
         return dict(self.data["output_variables"])
 
     def build(self, unit, target):
-        """Return ``body(t)`` in this surrogate's declared output units.
+        """Return ``(block, body(t))`` in this surrogate's declared output units.
+
+        The returned block is a ``pyo.Block(concrete=True)`` carrying a
+        ``coefficient_vars`` indexed ``pyo.Var`` (keyed by coefficient name
+        plus the reserved ``"intercept"`` key) and a ``coefficients``
+        ``CoefficientRegistry`` over that indexed Var. The block is returned
+        un-added; ``swap_relation`` attaches it to ``unit`` itself.
 
         Args:
             unit: The unit the relationship is built on.
@@ -164,8 +172,10 @@ class MultilinearSurrogate(Surrogate):
                 units -- but part of every builder's signature.
 
         Returns:
-            A callable taking a time index and returning a Pyomo expression
-            in the declared output units.
+            A tuple ``(block, body)`` where ``block`` is the surrogate's
+            coefficient block (or ``None`` if no coefficients are present),
+            and ``body`` is a callable taking a time index and returning a
+            Pyomo expression in the declared output units.
         """
         del target
         output_units = parse_units(next(iter(self.output_variables.values())))
@@ -176,18 +186,32 @@ class MultilinearSurrogate(Surrogate):
             )
             for name, units in self.input_variables.items()
         }
-        intercept = self.data["coefficients"].get(_INTERCEPT, 0.0)
-        terms = [
-            (float(coefficient), key.split("*"))
-            for key, coefficient in self.data["coefficients"].items()
-            if key != _INTERCEPT
-        ]
+
+        coefficients_data = self.data["coefficients"]
+        all_keys = list(coefficients_data.keys())
+        if _INTERCEPT not in all_keys:
+            all_keys.append(_INTERCEPT)
+
+        index_set = pyo.Set(initialize=all_keys)
+        coefficient_vars = pyo.Var(index_set, initialize=1.0)
+        block = pyo.Block(concrete=True)
+        block.coefficient_vars = coefficient_vars
+
+        for key in all_keys:
+            value = float(coefficients_data.get(key, 0.0))
+            coefficient_vars[key].set_value(value)
+            coefficient_vars[key].fix()
+
+        block.coefficients = CoefficientRegistry()
+        block.coefficients.register_coefficients(coefficient_vars)
 
         def body(t):
-            total = intercept
-            for coefficient, factors in terms:
-                term = coefficient
-                for name in factors:
+            total = coefficient_vars[_INTERCEPT]
+            for key, _ in coefficients_data.items():
+                if key == _INTERCEPT:
+                    continue
+                term = coefficient_vars[key]
+                for name in key.split("*"):
                     var, units = declared[name]
                     try:
                         converted = pyunits.convert(var[t], units)
@@ -203,4 +227,4 @@ class MultilinearSurrogate(Surrogate):
                 total = total + term
             return total * output_units
 
-        return body
+        return block, body

@@ -15,7 +15,139 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from flexcore.exceptions import FlexConfigError
 from flexcore.nomenclature import PowerKind
+
+
+class CoefficientRegistry:
+    """A dict-like container for a surrogate block's coefficient Vars.
+
+    Supports both scalar ``pyo.Var`` objects and indexed ``pyo.Var`` objects.
+    For indexed Vars, the registry yields individual index entries in
+    ``items()``, ``__iter__``, and ``__getitem__`` so callers see a flat
+    ``name -> Var`` view regardless of how the underlying Var is stored.
+
+    The registry dynamically expands as coefficients are registered. It is
+    attached to every surrogate block as ``block.coefficients`` before
+    ``build()`` returns, so a developer can call ``register_coefficient``
+    multiple times in a single ``build()`` method — useful when coefficients
+    come from several independent Var groups (e.g. separate low-flow and
+    high-flow regimes).
+
+    Attributes:
+        _scalar_vars: Mapping of coefficient name -> scalar pyo.Var.
+        _indexed_vars: Mapping of coefficient name -> indexed pyo.Var whose
+            index set holds the individual coefficient entries.
+    """
+
+    def __init__(self) -> None:
+        self._scalar_vars: dict[str, Any] = {}
+        self._indexed_vars: dict[str, Any] = {}
+
+    def _check_var(self, var: Any) -> None:
+        import pyomo.environ as pyo
+        from pyomo.core.base.var import VarData
+
+        if not isinstance(var, (pyo.Var, VarData)):
+            raise FlexConfigError(
+                f"Coefficient must be a pyo.Var or pyo.VarData, "
+                f"got {type(var).__name__}."
+            )
+
+    def register_coefficient(self, name: str, var: Any) -> None:
+        """Add a single named coefficient Var.
+
+        Args:
+            name: The coefficient name used by ``body(t)`` and
+                ``register_surrogate_coefficients``.
+            var: The Pyomo Var carrying this coefficient's value. May be a
+                scalar Var or an indexed Var; in the latter case the
+                individual index entries are surfaced through this registry.
+
+        Raises:
+            FlexConfigError: If ``name`` is already registered or ``var``
+                is not a ``pyo.Var``.
+        """
+        if name in self._scalar_vars or name in self._indexed_vars:
+            raise FlexConfigError(
+                f"Coefficient {name!r} is already registered on this block."
+            )
+        self._check_var(var)
+        if var.is_indexed():
+            self._indexed_vars[name] = var
+        else:
+            self._scalar_vars[name] = var
+
+    def register_coefficients(self, mapping) -> None:
+        """Bulk-add coefficients from a name->Var mapping or a single indexed Var.
+
+        Args:
+            mapping: Either a dict of coefficient name to Pyomo Var, or a
+                single indexed ``pyo.Var`` whose index set supplies the
+                coefficient names.
+
+        Raises:
+            FlexConfigError: If any name is already registered or any value
+                is not a ``pyo.Var``.
+        """
+        if hasattr(mapping, "is_indexed") and mapping.is_indexed():
+            for idx in mapping.index_set():
+                self.register_coefficient(idx, mapping[idx])
+            return
+        for name, var in mapping.items():
+            self.register_coefficient(name, var)
+
+    def items(self):
+        """Return the registered (name, Var) pairs."""
+        yield from self._scalar_vars.items()
+        for _parent_name, indexed_var in self._indexed_vars.items():
+            for idx in indexed_var.index_set():
+                yield idx, indexed_var[idx]
+
+    def __getitem__(self, name: str) -> Any:
+        if name in self._scalar_vars:
+            return self._scalar_vars[name]
+        for indexed_var in self._indexed_vars.values():
+            if name in indexed_var.index_set():
+                return indexed_var[name]
+        raise KeyError(name)
+
+    def __contains__(self, name: str) -> bool:
+        if name in self._scalar_vars:
+            return True
+        return any(name in iv.index_set() for iv in self._indexed_vars.values())
+
+    def __iter__(self):
+        yield from self._scalar_vars
+        for indexed_var in self._indexed_vars.values():
+            yield from indexed_var.index_set()
+
+    def __len__(self) -> int:
+        return len(self._scalar_vars) + sum(
+            len(iv.index_set()) for iv in self._indexed_vars.values()
+        )
+
+    def unfix(self) -> None:
+        """Unfix every registered coefficient Var."""
+        for var in self._scalar_vars.values():
+            if var.is_variable_type() and var.is_fixed():
+                var.unfix()
+        for indexed_var in self._indexed_vars.values():
+            for idx in indexed_var.index_set():
+                entry = indexed_var[idx]
+                if entry.is_variable_type() and entry.is_fixed():
+                    entry.unfix()
+
+    def fix(self) -> None:
+        """Fix every registered coefficient Var at its current value."""
+        for var in self._scalar_vars.values():
+            if var.is_variable_type():
+                var.fix()
+        for indexed_var in self._indexed_vars.values():
+            for idx in indexed_var.index_set():
+                entry = indexed_var[idx]
+                if entry.is_variable_type():
+                    entry.fix()
 
 
 class BoundaryKind(enum.StrEnum):
@@ -54,11 +186,15 @@ class ParameterRecord:
         param: The live Pyomo ``Param`` or ``Var``.
         name: The parameter's local name on its unit block.
         regressable: Whether FlexParameterize may fit this parameter.
+        relation_name: The relation this parameter belongs to, or ``None`` for
+            unit-level process parameters that are not tied to a specific
+            swapped relation.
     """
 
     param: Any
     name: str
     regressable: bool
+    relation_name: str | None = None
 
 
 @dataclass
@@ -120,6 +256,12 @@ class RelationRecord:
             keep each successive ``fitted`` Constraint's name unique (flex-pse
             never deletes a component, so a second swap cannot reuse the first
             fitted Constraint's name).
+        surrogate_block: The currently active surrogate sub-block (a Pyomo
+            Block carrying coefficient Vars and the fitted constraint), or
+            ``None`` when no surrogate has been swapped for this relation.
+        surrogate_blocks: Every surrogate block ever built for this relation,
+            oldest first. The list is append-only; deactivated blocks remain
+            here so ``switch_surrogate_block`` can reactivate them.
     """
 
     constraint: Any
@@ -129,6 +271,8 @@ class RelationRecord:
     fitted: Any = None
     components: list = field(default_factory=list)
     swap_count: int = 0
+    surrogate_block: Any = None
+    surrogate_blocks: list = field(default_factory=list)
 
 
 @dataclass
