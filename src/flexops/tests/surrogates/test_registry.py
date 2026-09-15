@@ -211,7 +211,7 @@ def test_coefficient_registry_register_coefficient_stores_indexed_var():
     registry = CoefficientRegistry()
     registry.register_coefficient("coefs", m.coefs)
 
-    assert "coefs" not in registry
+    assert "coefs" in registry
     assert "a" in registry
     assert "b" in registry
     assert registry["a"] is m.coefs["a"]

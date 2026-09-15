@@ -18,6 +18,7 @@ import pytest
 
 from flexcore.config.schema import SurrogateType
 from flexcore.exceptions import FlexConfigError, FlexDataError
+from flexops.surrogates import ArimaSurrogate
 from flexparameterize.regression import Regressor
 from flexparameterize.regression.arima import ArimaRegressor
 
@@ -213,27 +214,18 @@ def test_surrogate_spec_data_contract():
     assert set(data) == {
         "input_variables",
         "output_variables",
-        "exogenous_variables",
-        "order",
-        "seasonal_order",
-        "const",
-        "ar_coefs",
-        "ma_coefs",
-        "exog_coefs",
-        "_residuals",
-        "init_values",
-        "training_start_date",
-        "training_time_step_seconds",
-        "training_y_values",
+        "coefficients",
+        "history",
     }
-    assert data["exogenous_variables"] == ["feed"]
-    assert data["order"] == [0, 0, 0]
-    assert data["output_variables"] == {"biogas": "m^3/hr"}
-    assert isinstance(data["const"], float)
-    assert isinstance(data["ar_coefs"], list)
-    assert isinstance(data["ma_coefs"], list)
-    assert isinstance(data["exog_coefs"], list)
-    assert len(data["exog_coefs"]) == 1
+    assert data["coefficients"]["order"] == [0, 0, 0]
+    assert "intercept" in data["coefficients"]
+    assert "exog_coefs" in data["coefficients"]
+    assert len(data["coefficients"]["exog_coefs"]) == 1
+    assert isinstance(data["coefficients"]["intercept"], float)
+    assert isinstance(data["coefficients"]["exog_coefs"], list)
+    assert len(data["coefficients"]["exog_coefs"]) == 1
+    assert len(data["history"]["y_values"]) == n
+    assert len(data["history"]["eps_values"]) == n
 
 
 @pytest.mark.unit
@@ -383,9 +375,8 @@ def test_fits_biogas_with_feed_and_ts_exog():
 
     spec = regressor.to_surrogate_spec()
     assert spec.surrogate_type == SurrogateType.ARIMA
-    assert spec.data["exogenous_variables"] == ["feed_volume_kg", "TS_pct"]
-    assert len(spec.data["exog_coefs"]) == 2
-    assert spec.data["order"] == [1, 0, 1]
+    assert spec.data["coefficients"]["order"] == [1, 0, 1]
+    assert len(spec.data["coefficients"]["exog_coefs"]) == 2
     assert spec.data["output_variables"] == {"biogas_m3_hour": "m^3/hr"}
 
 
@@ -412,16 +403,16 @@ def test_biogas_surrogate_spec_has_all_keys():
     data = spec.data
     assert "input_variables" in data
     assert "output_variables" in data
-    assert "exogenous_variables" in data
-    assert "order" in data
-    assert "const" in data
-    assert "ar_coefs" in data
-    assert "ma_coefs" in data
-    assert "exog_coefs" in data
+    assert "coefficients" in data
+    assert "order" in data["coefficients"]
+    assert "intercept" in data["coefficients"]
+    assert "ar_coefs" in data["coefficients"]
+    assert "ma_coefs" in data["coefficients"]
+    assert "exog_coefs" in data["coefficients"]
 
-    assert len(data["ar_coefs"]) == 2  # AR(2)
-    assert len(data["ma_coefs"]) == 1  # MA(1)
-    assert len(data["exog_coefs"]) == 2  # two exogenous columns
+    assert len(data["coefficients"]["ar_coefs"]) == 2  # AR(2)
+    assert len(data["coefficients"]["ma_coefs"]) == 1  # MA(1)
+    assert len(data["coefficients"]["exog_coefs"]) == 2  # two exogenous columns
 
 
 # -- validation: non-differenced only -----------------------------------------
@@ -519,8 +510,38 @@ def test_include_drift_with_d1_fits_and_spec_includes_drift():
     assert regressor.order[1] == 1
 
     spec = regressor.to_surrogate_spec()
-    assert "drift" in spec.data
-    assert isinstance(spec.data["drift"], float)
+    assert "drift" in spec.data["coefficients"]
+    assert isinstance(spec.data["coefficients"]["drift"], float)
+
+
+@pytest.mark.unit
+def test_d1_default_mean_uses_constant_drift_for_pyomo_contract():
+    """The d=1 default deterministic term matches ArimaSurrogate's drift."""
+    pytest.importorskip("scipy")
+
+    rng = np.random.default_rng(12)
+    n = 120
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    differences = np.empty(n - 1)
+    differences[0] = 0.2
+    for position in range(1, n - 1):
+        differences[position] = (
+            0.35 + 0.4 * differences[position - 1] + rng.normal(0.0, 0.01)
+        )
+    y = pd.DataFrame(
+        {"y": np.concatenate(([1.0], 1.0 + np.cumsum(differences)))}, index=idx
+    )
+
+    regressor = ArimaRegressor(order=(1, 1, 0), max_ar_persistence=None).fit(
+        pd.DataFrame(index=idx), y, output_units="m^3/hr"
+    )
+
+    assert "const" not in regressor.coefficients
+    assert regressor.coefficients["drift"] == pytest.approx(0.35, abs=0.03)
+    spec = regressor.to_surrogate_spec()
+    assert "const" not in spec.data["coefficients"]
+    assert "drift" in spec.data["coefficients"]
+    ArimaSurrogate(spec.data)
 
 
 @pytest.mark.unit
@@ -568,8 +589,8 @@ def test_auto_arima_d_greater_than_one_raises(monkeypatch):
 
 
 @pytest.mark.unit
-def test_high_ar_persistence_raises():
-    """AR coefficient exceeding max_ar_persistence raises FlexConfigError."""
+def test_high_ar_persistence_is_bounded_not_rejected():
+    """A near-unit-root fit is bounded to max_ar_persistence, not rejected."""
     pytest.importorskip("scipy")
 
     rng = np.random.default_rng(99)
@@ -578,9 +599,12 @@ def test_high_ar_persistence_raises():
     vals = np.cumsum(rng.normal(0, 0.1, size=n))
     y = pd.DataFrame({"y": vals}, index=idx)
 
-    # AR(1) with default max_ar_persistence=0.85 should raise
-    with pytest.raises(FlexConfigError, match="max_ar_persistence"):
-        ArimaRegressor(order=(1, 0, 0)).fit(pd.DataFrame(index=idx), y)
+    # AR(1) on a random walk wants |phi| ~= 1; the default
+    # max_ar_persistence=0.85 constrains the fit itself instead of raising.
+    regressor = ArimaRegressor(order=(1, 0, 0)).fit(pd.DataFrame(index=idx), y)
+    assert regressor.fitted is True
+    ar_coef = regressor.coefficients["ar1"]
+    assert abs(ar_coef) <= 0.85 + 1e-6
 
 
 @pytest.mark.unit

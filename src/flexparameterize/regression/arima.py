@@ -97,13 +97,13 @@ class ArimaRegressor:
     surrogate implements, so fitted parameters reproduce the surrogate
     one-to-one.  Pure AR(p) models use closed-form OLS.
 
-    **AR persistence check**: After fitting, AR coefficients with absolute
-    value greater than ``max_ar_persistence`` (default 0.85) raise
-    ``FlexConfigError``.  This is not a fitting-artefact guard: the Pyomo
-    surrogate implements the mean ARIMA equation as a difference equation,
-    and coefficients near the unit root (\\|ar\\| ≳ 1) make the resulting
-    optimisation problem numerically unstable regardless of the backend
-    used to estimate them.  Set ``max_ar_persistence=None`` to disable.
+    **AR persistence bound**: AR coefficients are constrained to
+    ``[-max_ar_persistence, max_ar_persistence]`` (default 0.85) during the
+    fit itself, not merely checked afterward: the Pyomo surrogate implements
+    the mean ARIMA equation as a difference equation, and coefficients near
+    the unit root (\\|ar\\| >= 1) make the resulting optimisation problem
+    numerically unstable regardless of the backend used to estimate them.
+    Set ``max_ar_persistence=None`` to fit unconstrained.
 
     Args:
         order: ``(p, d, q)`` ARIMA order; required when ``auto`` is ``False``.
@@ -113,12 +113,13 @@ class ArimaRegressor:
             satisfy ``D == 0`` and ``P == Q == 0`` — the direct-fit backend
             does not support seasonal AR/MA terms, so only the trivial
             ``(0, 0, 0, m)`` (equivalent to ``None``) is accepted.
-        include_mean: Whether to include a constant/intercept term.
-            Default ``True``.
-        include_drift: Whether to include a drift term (linear trend in the
-            differenced series). Default ``False``.  Only meaningful when
-            ``d=1``; setting ``include_drift=True`` with ``d=0`` raises
-            ``FlexConfigError``.
+        include_mean: Whether to include the model's deterministic term.
+            This is a level intercept for ``d=0`` and constant drift for
+            ``d=1``. Default ``True``.
+        include_drift: Whether to include a drift term (constant in the
+            differenced series). Default ``False``. For ``d=1`` this is an
+            explicit alias for the default ``include_mean`` deterministic
+            term; setting it with ``d=0`` raises ``FlexConfigError``.
         auto: If ``True``, run ``statsforecast.models.AutoARIMA`` to
             discover the best ``(p, d, q)`` and ``(P, D, Q, m)``, then
             refit that order with the direct scipy backend for Pyomo
@@ -128,9 +129,10 @@ class ArimaRegressor:
         auto_kwargs: Extra keyword arguments forwarded to ``AutoARIMA``
             (e.g. ``max_p``, ``max_q``, ``max_P``, ``season_length``).
             ``D`` defaults to 0; pass ``max_d=1`` to allow differencing.
-        max_ar_persistence: Maximum allowed absolute value for any AR
-            coefficient.  Default ``0.85``.  Set to ``None`` to disable
-            this check.
+        max_ar_persistence: Bounds every AR coefficient to
+            ``[-max_ar_persistence, max_ar_persistence]`` during the fit
+            itself (via bounded least squares). Default ``0.85``. Set to
+            ``None`` to fit unconstrained.
         stationary: If ``True``, force ``stationary=True`` in
             ``statsforecast.models.AutoARIMA``, which restricts the
             search to models with stationary AR coefficients.  Default
@@ -380,6 +382,7 @@ class ArimaRegressor:
                     seasonal_order=(P, D, Q, m),
                     include_mean=self._include_mean,
                     include_drift=self._include_drift,
+                    max_ar_persistence=self._max_ar_persistence,
                 )
             else:
                 p, d, q = self._order
@@ -391,6 +394,7 @@ class ArimaRegressor:
                     seasonal_order=(P, D, Q, m),
                     include_mean=self._include_mean,
                     include_drift=self._include_drift,
+                    max_ar_persistence=self._max_ar_persistence,
                 )
 
         self.model = fitted_model
@@ -403,7 +407,10 @@ class ArimaRegressor:
             ar_keys = [k for k in coef.keys() if str(k).startswith("ar")]
             for key in ar_keys:
                 val = float(coef[key])
-                if abs(val) > self._max_ar_persistence:
+                # The fit is bounded to +/-max_ar_persistence (see
+                # _fit_ar_ols/_fit_arma_nls), so this can only fire from
+                # floating-point slop right at the boundary.
+                if abs(val) > self._max_ar_persistence * (1 + 1e-9):
                     raise FlexConfigError(
                         f"ArimaRegressor rejected fitted AR coefficient "
                         f"{key}={val:.4f} because it exceeds "
@@ -531,7 +538,7 @@ class ArimaRegressor:
             FlexDataError: If :meth:`fit` has not been called.
         """
         params = self._params()
-        p, _d, q = self._order  # type: ignore[misc]
+        p, d, q = self._order  # type: ignore[misc]
 
         ar_coefs = _collect_lags(params, "ar", p)
         ma_coefs = _collect_lags(params, "ma", q)
@@ -543,8 +550,10 @@ class ArimaRegressor:
             **{f"ma.L{j}": v for j, v in enumerate(ma_coefs, 1)},
             **dict(zip(self.exogenous_variables, exog_coefs, strict=True)),
         }
-        if const != 0.0:
-            coefficients["const"] = const
+        drift = params.get("drift", 0.0)
+        deterministic = const if d == 0 else drift
+        if deterministic != 0.0:
+            coefficients["const" if d == 0 else "drift"] = deterministic
 
         return FitResult(
             coefficients=coefficients,
@@ -563,17 +572,15 @@ class ArimaRegressor:
 
         - ``input_variables``: all fitted exogenous variable names and units.
         - ``output_variables``: the output variable name and its units.
-        - ``exogenous_variables``: the subset of ``input_variables`` that are
-          exogenous (i.e. all of them for a pure regression ARIMA).
-        - ``order``: the fitted ``(p, d, q)`` tuple.
-        - ``seasonal_order``: the fitted seasonal order, or ``null``.
-        - ``const``: the fitted constant (if present).
+                - ``order``: the fitted ``(p, d, q)`` tuple.
+                - ``intercept``: the fitted level intercept when ``d=0``.
+                - ``drift``: the fitted differenced-equation constant when ``d=1``.
         - ``ar_coefs``: list of AR coefficients in lag order.
         - ``ma_coefs``: list of MA coefficients in lag order.
         - ``exog_coefs``: list of exogenous coefficients, one per column in
           fitted order.
-        - ``drift``: the fitted drift coefficient (only present when
-          ``include_drift=True`` and ``d=1``).
+                - ``initial_state``: final levels and innovations for the next local
+                    horizon.
 
         Returns:
             A :class:`~flexcore.config.schema.SurrogateSpec` of type
@@ -611,43 +618,46 @@ class ArimaRegressor:
         const = params.get("const", 0.0)
         drift = params.get("drift", None)
 
-        seasonal_order = None
-        if self._seasonal_order is not None:
-            P, D, Q, m = self._seasonal_order
-            seasonal_order = [int(P), int(D), int(Q), int(m)]
-
-        residuals = np.asarray(self.model_["residuals"]).tolist()
-        p, d, q = self._order
+        coefficients: dict[str, object] = {"order": [int(p), int(d), int(q)]}
         if d == 0:
-            init_values = np.asarray(self._y_values[:p]).tolist() if p > 0 else []
-        else:
-            # The surrogate only ever consults `init_values` for d>0 when the
-            # deployed model starts exactly at the training start (offset==0),
-            # a case ArimaSurrogate.build() now rejects outright (it has no
-            # real "value before training start" to fall back to). This is
-            # therefore unused data in every path the surrogate accepts, kept
-            # only to satisfy the SurrogateSpec data contract's shape check;
-            # use the same "pad with the first observed value(s)" convention
-            # the d==0 branch above uses (not the *last* d values, which bear
-            # no relationship to "the value before training start").
-            init_values = np.asarray(self._y_values[:d]).tolist()
+            coefficients["intercept"] = float(const)
+        elif drift is not None:
+            coefficients["drift"] = float(drift)
+        if p > 0:
+            coefficients["ar_coefs"] = [float(v) for v in ar_coefs]
+        if q > 0:
+            coefficients["ma_coefs"] = [float(v) for v in ma_coefs]
+        if len(self.exogenous_variables) > 0:
+            coefficients["exog_coefs"] = [float(v) for v in exog_coefs]
+        # NOT IMPLEMENTED PLACE HOLDER
+        # seasonal_order = None
+        # if self._seasonal_order is not None:
+        #     P, D, Q, m = self._seasonal_order
+        #     seasonal_order = [int(P), int(D), int(Q), int(m)]
 
-        # Compute training metadata so the surrogate can align itself to
-        # any Pyomo TimeBlock start time.
-        training_index = getattr(self, "_training_index", None)
-        if training_index is not None and hasattr(training_index, "freq"):
-            try:
-                dt_seconds = float(pd.Timedelta(training_index.freq).total_seconds())
-            except (AttributeError, ValueError):
-                dt_seconds = 3600.0
-            training_start = training_index[0].isoformat()
-        else:
-            dt_seconds = 3600.0
-            training_start = (
-                pd.Timestamp(self.data_window[0]).isoformat()
-                if self.data_window
-                else ""
+        residuals = np.asarray(self.model_["residuals"])
+        history_prefix = max(p + d, q)
+        training_index = self._training_index
+        if getattr(training_index, "freq", None) is not None:
+            time_step_seconds = float(pd.Timedelta(training_index.freq).total_seconds())
+        elif len(training_index) > 1:
+            time_step_seconds = float(
+                (training_index[1] - training_index[0]).total_seconds()
             )
+        else:
+            time_step_seconds = 3600.0
+        history = {
+            "start_date": training_index[0].isoformat(),
+            "time_step_seconds": time_step_seconds,
+            "y_values": (
+                np.asarray(
+                    [self._y_values[0]] * (history_prefix - (p + d))
+                    + self._y_values[: p + d].tolist()
+                ).tolist()
+                + np.asarray(self._y_values).tolist()
+            ),
+            "eps_values": [0.0] * (history_prefix + d) + residuals.tolist(),
+        }
 
         return SurrogateSpec(
             surrogate_type=SurrogateType.ARIMA,
@@ -656,19 +666,8 @@ class ArimaRegressor:
                     name: self.input_units[name] for name in self.exogenous_variables
                 },
                 "output_variables": {self.output_variable: self.output_units},
-                "exogenous_variables": list(self.exogenous_variables),
-                "order": [int(p), int(d), int(q)],
-                "seasonal_order": seasonal_order,
-                "const": const,
-                "ar_coefs": ar_coefs,
-                "ma_coefs": ma_coefs,
-                "exog_coefs": exog_coefs,
-                "_residuals": residuals,
-                "init_values": init_values,
-                "training_start_date": training_start,
-                "training_time_step_seconds": dt_seconds,
-                "training_y_values": np.asarray(self._y_values).tolist(),
-                **({"drift": float(drift)} if drift is not None else {}),
+                "coefficients": coefficients,
+                "history": history,
             },
         )
 
@@ -1084,9 +1083,19 @@ class _DirectResults:
                 y_hist = list(y_source[max(0, start - p) : start])
                 eps_hist = list(self._resid[max(0, start - q) : start]) if q > 0 else []
             else:
-                # For d=1, work with original (level) series
+                # For d=1, work with original (level) series.
+                # Need at least p+1 history values: y[t-1], y[t-2], ..., y[t-p-1]
                 y_hist = list(y_source[max(0, start - p - 1) : start])
-                eps_hist = list(self._resid[max(0, start - q) : start]) if q > 0 else []
+                # self._resid is aligned to the differenced series (length
+                # nobs = n - d), so a level-index `start` must be shifted by
+                # `_d` before indexing into it.
+                eps_hist = (
+                    list(self._resid[max(0, start - q - _d) : start - _d])
+                    if q > 0
+                    else []
+                )
+                if len(y_hist) < p + 1:
+                    y_hist = list(y_source[: p + 1])
             forecasts = []
 
             for step in range(steps):
@@ -1094,7 +1103,7 @@ class _DirectResults:
                     ar_part = sum(ar[j] * y_hist[-(j + 1)] for j in range(p))
                     ma_part = (
                         sum(ma[j] * eps_hist[-(j + 1)] for j in range(q))
-                        if q > 0 and len(eps_hist) >= q
+                        if q > 0 and len(eps_hist) >= q and step == 0
                         else 0.0
                     )
                     exog_part = (
@@ -1105,14 +1114,14 @@ class _DirectResults:
                     drift_part = 0.0
                     y_hat = c + drift_part + ar_part + ma_part + exog_part
                 else:
-                    # d=1: y[t] = y[t-1] + c + drift*t +
+                    # d=1: y[t] = y[t-1] + drift +
                     # sum(ar[i]*(y[t-i]-y[t-i-1])) + ma + exog
                     ar_diff_part = sum(
                         ar[j] * (y_hist[-(j + 1)] - y_hist[-(j + 2)]) for j in range(p)
                     )
                     ma_part = (
                         sum(ma[j] * eps_hist[-(j + 1)] for j in range(q))
-                        if q > 0 and len(eps_hist) >= q
+                        if q > 0 and len(eps_hist) >= q and step == 0
                         else 0.0
                     )
                     exog_part = (
@@ -1120,15 +1129,16 @@ class _DirectResults:
                         if exog is not None
                         else 0.0
                     )
-                    drift_part = drift * (start + step + 1)
+                    drift_part = drift
                     y_diff_hat = c + drift_part + ar_diff_part + ma_part + exog_part
                     y_hat = y_hist[-1] + y_diff_hat
 
                 forecasts.append(y_hat)
                 y_hist.append(y_hat)
-                if q > 0 and (step + start) < len(self._resid):
-                    eps_hist.append(self._resid[step + start])
-                elif q > 0:
+                # MA terms are zeroed after the first step (matching the
+                # Pyomo surrogate's zero-future-innovation forecast); do not
+                # leak later real fitted residuals into the MA lag.
+                if q > 0:
                     eps_hist.append(0.0)
 
             return np.array(forecasts)
@@ -1160,7 +1170,7 @@ class _DirectResults:
                 drift_part = 0.0
                 y_hat = c + drift_part + ar_part + ma_part + exog_part
             else:
-                # d=1: y[t] = y[t-1] + c + drift*t +
+                # d=1: y[t] = y[t-1] + drift +
                 # sum(ar[i] * (y[t-i] - y[t-i-1])) + ma + exog
                 ar_diff_part = sum(
                     ar[j] * (y_hist[-(j + 1)] - y_hist[-(j + 2)]) for j in range(p)
@@ -1175,7 +1185,7 @@ class _DirectResults:
                     if exog is not None
                     else 0.0
                 )
-                drift_part = drift * (len(self._y_original) + step + 1)
+                drift_part = drift
                 y_diff_hat = c + drift_part + ar_diff_part + ma_part + exog_part
                 y_hat = y_hist[-1] + y_diff_hat
 
@@ -1193,13 +1203,13 @@ def _fit_pure_regression(
     has_const: bool,
     has_drift: bool,
 ) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray]:
-    """Fit y = c + drift·t + Xβ + ε via OLS."""
+    """Fit y = c + drift + Xβ + ε via OLS."""
     n = len(y)
     cols: list[np.ndarray] = []
     if has_const:
         cols.append(np.ones(n))
     if has_drift:
-        cols.append(np.arange(2, n + 2))
+        cols.append(np.ones(n))
     if x_values is not None and x_values.shape[1] > 0:
         for k in range(x_values.shape[1]):
             cols.append(x_values[:, k])
@@ -1230,8 +1240,9 @@ def _fit_ar_ols(
     exog_names: list[str],
     has_const: bool,
     has_drift: bool,
+    max_ar_persistence: float | None = None,
 ) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray]:
-    """Fit pure AR(p) via closed-form OLS on the design matrix."""
+    """Fit pure AR(p) via OLS, bounded to +/-max_ar_persistence when set."""
     n = len(y)
     max_lag = p
     T = n - max_lag
@@ -1240,7 +1251,7 @@ def _fit_ar_ols(
     if has_const:
         cols.append(np.ones(T))
     if has_drift:
-        cols.append(np.arange(2, T + 2))
+        cols.append(np.ones(T))
     for j in range(1, p + 1):
         cols.append(y[max_lag - j : n - j])
     if x_values is not None and x_values.shape[1] > 0:
@@ -1258,7 +1269,17 @@ def _fit_ar_ols(
 
     X = np.column_stack(cols)
     y_vec = y[max_lag:]
-    theta, _, _, _ = np.linalg.lstsq(X, y_vec, rcond=None)
+    if max_ar_persistence is None:
+        theta, _, _, _ = np.linalg.lstsq(X, y_vec, rcond=None)
+    else:
+        from scipy.optimize import lsq_linear
+
+        ar_offset = has_const + has_drift
+        lb = np.full(X.shape[1], -np.inf)
+        ub = np.full(X.shape[1], np.inf)
+        lb[ar_offset : ar_offset + p] = -max_ar_persistence
+        ub[ar_offset : ar_offset + p] = max_ar_persistence
+        theta = lsq_linear(X, y_vec, bounds=(lb, ub)).x
 
     residuals = np.zeros(n)
     fitted = np.full(n, np.nan)
@@ -1283,7 +1304,7 @@ def _arma_residuals(
     """Residual function for scipy.optimize.least_squares.
 
     Computes the mean-equation residual for each observation t:
-        r[t] = y[t] - (c + drift·(t+1) + Σ ar_j·y[t-j-1]
+        r[t] = y[t] - (c + drift + Σ ar_j·y[t-j-1]
         + Σ ma_j·ε[t-j-1] + Σ β_k·x[t,k])
 
     Returns the effective residuals (t >= max(p, q)) as a flat vector for
@@ -1318,7 +1339,7 @@ def _arma_residuals(
         for k in range(n_exog):
             exog_part += beta[k] * x[t, k]
 
-        drift_part = drift * (t + 2)
+        drift_part = drift
         eps[t] = y[t] - (c + drift_part + ar_part + ma_part + exog_part)
 
     return eps[max_lag:]
@@ -1332,11 +1353,14 @@ def _fit_arma_nls(
     exog_names: list[str],
     has_const: bool,
     has_drift: bool,
+    max_ar_persistence: float | None = None,
 ) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray]:
     """Fit ARMA(p,q) via nonlinear least squares (Levenberg-Marquardt).
 
     The initial guess is obtained by OLS on the AR lags + exog (ignoring
-    MA terms), with MA coefficients starting at zero.
+    MA terms), with MA coefficients starting at zero. AR coefficients are
+    bounded to +/-max_ar_persistence when set (this forces the 'trf'
+    solver, since Levenberg-Marquardt does not support bounds).
     """
     from scipy.optimize import least_squares
 
@@ -1349,9 +1373,7 @@ def _fit_arma_nls(
     if has_const:
         cols.append(np.ones(n - max_lag) if max_lag > 0 else np.ones(n))
     if has_drift:
-        cols.append(
-            np.arange(2, n - max_lag + 2) if max_lag > 0 else np.arange(2, n + 2)
-        )
+        cols.append(np.ones(n - max_lag) if max_lag > 0 else np.ones(n))
     for j in range(1, p + 1):
         start = max_lag - j
         end = n - j
@@ -1391,11 +1413,29 @@ def _fit_arma_nls(
             if has_const:
                 theta0[0] = float(np.mean(y))
 
+    if max_ar_persistence is None:
+        bounds = (-np.inf, np.inf)
+        method = "lm"
+    else:
+        ar_offset = has_const + has_drift
+        lb = np.full(theta0.shape, -np.inf)
+        ub = np.full(theta0.shape, np.inf)
+        lb[ar_offset : ar_offset + p] = -max_ar_persistence
+        ub[ar_offset : ar_offset + p] = max_ar_persistence
+        theta0[ar_offset : ar_offset + p] = np.clip(
+            theta0[ar_offset : ar_offset + p],
+            lb[ar_offset : ar_offset + p],
+            ub[ar_offset : ar_offset + p],
+        )
+        bounds = (lb, ub)
+        method = "trf"  # 'lm' does not support bounds
+
     result = least_squares(
         _arma_residuals,
         theta0,
         args=(y, x_values, p, q, has_const, has_drift, n_exog),
-        method="lm",
+        method=method,
+        bounds=bounds,
         verbose=0,
         max_nfev=5000,
         ftol=1e-8,
@@ -1425,7 +1465,7 @@ def _fit_arma_nls(
         exog_part = (
             sum(beta[k] * x_values[t, k] for k in range(n_exog)) if n_exog > 0 else 0.0
         )
-        drift_part = drift_val * (t + 2)
+        drift_part = drift_val
         y_hat = c + drift_part + ar_part + ma_part + exog_part
         fitted[t] = y_hat
         eps[t] = y[t] - y_hat
@@ -1455,6 +1495,7 @@ def _fit_direct(
     seasonal_order: tuple[int, int, int, int],
     include_mean: bool,
     include_drift: bool = False,
+    max_ar_persistence: float | None = None,
 ) -> _DirectResults:
     """Fit ARIMA directly via OLS/NLS, matching the Pyomo surrogate's objective.
 
@@ -1477,6 +1518,9 @@ def _fit_direct(
         include_mean: Whether to include a constant term.
         include_drift: Whether to include a drift term.  Only meaningful
             when ``d=1``.
+        max_ar_persistence: Bounds every AR coefficient to
+            ``[-max_ar_persistence, max_ar_persistence]`` during the fit.
+            ``None`` fits unconstrained.
 
     Returns:
         Fitted :class:`_DirectResults`.
@@ -1507,8 +1551,8 @@ def _fit_direct(
     else:
         y_original = y_values.copy()
 
-    has_const = include_mean
-    has_drift = include_drift and d == 1
+    has_const = include_mean and d == 0
+    has_drift = d == 1 and (include_mean or include_drift)
     k_params = (1 if has_const else 0) + (1 if has_drift else 0) + p + q + n_exog
 
     if p == 0 and q == 0:
@@ -1517,11 +1561,24 @@ def _fit_direct(
         )
     elif q == 0:
         theta, param_names, residuals, fitted = _fit_ar_ols(
-            y_values, p, x_values, exog_names, has_const, has_drift
+            y_values,
+            p,
+            x_values,
+            exog_names,
+            has_const,
+            has_drift,
+            max_ar_persistence,
         )
     else:
         theta, param_names, residuals, fitted = _fit_arma_nls(
-            y_values, p, q, x_values, exog_names, has_const, has_drift
+            y_values,
+            p,
+            q,
+            x_values,
+            exog_names,
+            has_const,
+            has_drift,
+            max_ar_persistence,
         )
 
     return _DirectResults(
