@@ -766,7 +766,7 @@ class ArimaSurrogate(Surrogate):
                         else difference_at(position - lag)
                     )
                     mean += block.ar_coefs[lag] * lagged
-            if q > 0 and position == 0:
+            if q > 0:
                 for lag in range(1, q + 1):
                     mean += block.ma_coefs[lag] * innovation_at(position - lag)
             for index, (variable, declared_units) in enumerate(exogenous, start=1):

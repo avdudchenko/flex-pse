@@ -1103,7 +1103,7 @@ class _DirectResults:
                     ar_part = sum(ar[j] * y_hist[-(j + 1)] for j in range(p))
                     ma_part = (
                         sum(ma[j] * eps_hist[-(j + 1)] for j in range(q))
-                        if q > 0 and len(eps_hist) >= q and step == 0
+                        if q > 0 and len(eps_hist) >= q
                         else 0.0
                     )
                     exog_part = (
@@ -1121,7 +1121,7 @@ class _DirectResults:
                     )
                     ma_part = (
                         sum(ma[j] * eps_hist[-(j + 1)] for j in range(q))
-                        if q > 0 and len(eps_hist) >= q and step == 0
+                        if q > 0 and len(eps_hist) >= q
                         else 0.0
                     )
                     exog_part = (
@@ -1135,9 +1135,6 @@ class _DirectResults:
 
                 forecasts.append(y_hat)
                 y_hist.append(y_hat)
-                # MA terms are zeroed after the first step (matching the
-                # Pyomo surrogate's zero-future-innovation forecast); do not
-                # leak later real fitted residuals into the MA lag.
                 if q > 0:
                     eps_hist.append(0.0)
 
@@ -1157,11 +1154,7 @@ class _DirectResults:
         for step in range(steps):
             if _d == 0:
                 ar_part = sum(ar[j] * y_hist[-(j + 1)] for j in range(p))
-                ma_part = (
-                    sum(ma[j] * eps_hist[-(j + 1)] for j in range(q))
-                    if step == 0
-                    else 0.0
-                )
+                ma_part = sum(ma[j] * eps_hist[-(j + 1)] for j in range(q))
                 exog_part = (
                     sum(beta[k] * exog[step, k] for k in range(n_exog))
                     if exog is not None
@@ -1175,11 +1168,7 @@ class _DirectResults:
                 ar_diff_part = sum(
                     ar[j] * (y_hist[-(j + 1)] - y_hist[-(j + 2)]) for j in range(p)
                 )
-                ma_part = (
-                    sum(ma[j] * eps_hist[-(j + 1)] for j in range(q))
-                    if step == 0
-                    else 0.0
-                )
+                ma_part = sum(ma[j] * eps_hist[-(j + 1)] for j in range(q))
                 exog_part = (
                     sum(beta[k] * exog[step, k] for k in range(n_exog))
                     if exog is not None
