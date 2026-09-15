@@ -87,6 +87,11 @@ Not yet implemented
    ExponentialSurrogate
    NeuralNetworkSurrogate
 
+.. toctree::
+   :hidden:
+
+   generated/flexops.surrogates.ArimaSurrogate
+
 ``SurrogateType.CONSTANT_INTENSITY`` has no class here at all. It fixes a
 unit's ``energy_intensity`` process parameter rather than swapping a
 Constraint, so :func:`~flexparameterize.apply.apply_to_model` handles it

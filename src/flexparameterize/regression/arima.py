@@ -572,13 +572,13 @@ class ArimaRegressor:
 
         - ``input_variables``: all fitted exogenous variable names and units.
         - ``output_variables``: the output variable name and its units.
-                - ``order``: the fitted ``(p, d, q)`` tuple.
-                - ``intercept``: the fitted level intercept when ``d=0``.
-                - ``drift``: the fitted differenced-equation constant when ``d=1``.
+        - ``order``: the fitted ``(p, d, q)`` tuple.
+        - ``intercept``: the fitted level intercept when ``d=0``.
+        - ``drift``: the fitted differenced-equation constant when ``d=1``.
         - ``ar_coefs``: list of AR coefficients in lag order.
         - ``ma_coefs``: list of MA coefficients in lag order.
-        - ``exog_coefs``: list of exogenous coefficients, one per column in
-          fitted order.
+                - ``exog_coefs``: list of exogenous coefficients, one per column in
+                    fitted order.
                 - ``initial_state``: final levels and innovations for the next local
                     horizon.
 
