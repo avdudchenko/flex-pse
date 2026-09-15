@@ -271,9 +271,38 @@ def test_reswapping_arima_relation_succeeds_and_uses_latest_coefficients():
     "order,auto,auto_kwargs",
     [
         ((1, 0, 0), False, {}),
+        ((2, 0, 0), False, {}),
+        ((3, 0, 0), False, {}),
+        ((0, 0, 1), False, {}),
+        ((0, 0, 2), False, {}),
+        ((0, 0, 3), False, {}),
+        ((1, 0, 1), False, {}),
+        ((2, 0, 2), False, {}),
+        ((3, 0, 3), False, {}),
+        ((0, 1, 0), False, {}),
+        ((1, 1, 0), False, {}),
+        ((0, 1, 1), False, {}),
+        ((1, 1, 1), False, {}),
+        ((2, 1, 2), False, {}),
         (None, True, {"max_p": 3, "max_q": 3}),
     ],
-    ids=["explicit-ar1", "auto"],
+    ids=[
+        "explicit-ar1",
+        "explicit-ar2",
+        "explicit-ar3",
+        "explicit-ma1",
+        "explicit-ma2",
+        "explicit-ma3",
+        "explicit-ar1-ma1",
+        "explicit-ar2-ma2",
+        "explicit-ar3-ma3",
+        "explicit-i1",
+        "explicit-ar1-i1",
+        "explicit-i1-ma1",
+        "explicit-ar1-i1-ma1",
+        "explicit-ar2-i1-ma2",
+        "auto",
+    ],
 )
 def test_arima_roundtrip(order, auto, auto_kwargs):
     """Fit, build Pyomo surrogate, optimize exog controls, verify against direct fit."""
@@ -362,9 +391,6 @@ def test_arima_roundtrip(order, auto, auto_kwargs):
     m.unit.swap_relation("biogas_m3_hour_relation", surrogate)
 
     for t in range(n_insample + n_fcst):
-        m.unit.biogas_m3_hour[t].set_value(float(sm_all[t]))
-
-    for t in range(n_insample + n_fcst):
         m.unit.feed[t].set_value(float(all_exog[t].item()))
         m.unit.feed[t].fix()
     feed_min = float(X["feed"].min())
@@ -401,12 +427,17 @@ def test_arima_roundtrip(order, auto, auto_kwargs):
             for t in range(n_insample + n_fcst, n_total)
         ]
     )
-
-    insample_rmse = float(np.sqrt(np.mean((pyomo_insample - direct_insample) ** 2)))
-    forecast_rmse = float(np.sqrt(np.mean((pyomo_fcst - direct_fcst) ** 2)))
-
-    assert insample_rmse < 1e-4, f"In-sample RMSE too high: {insample_rmse}"
-    assert forecast_rmse < 1e-4, f"Forecast RMSE too high: {forecast_rmse}"
+    inital_point = (
+        abs(float(pyomo_insample[0] - direct_insample[0])) / direct_insample[0] * 100
+    )
+    instample_delta = np.max((pyomo_insample - direct_insample) / direct_insample) * 100
+    print(f"In-sample initial point difference: {inital_point}")
+    print(f"pyomo_insample: {pyomo_insample}")
+    print(f"direct_insample: {direct_insample}")
+    forcast_delta = np.max((pyomo_fcst - direct_fcst) / direct_fcst) * 100
+    assert inital_point < 1e-4, f"In-sample point too high: {inital_point}"
+    assert instample_delta < 1e-4, f"In-sample delta too high: {instample_delta}"
+    assert forcast_delta < 1e-4, f"Forecast delta too high: {forcast_delta}"
     _assert_tail_matches_target(pyomo_opt, target_biogas, lookback=10)
 
 
