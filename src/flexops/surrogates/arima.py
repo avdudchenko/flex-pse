@@ -721,14 +721,35 @@ class ArimaSurrogate(Surrogate):
         block._time_values = tuple(time_values)
         block.get_regression_objective = MethodType(_get_regression_objective, block)
 
-        def level_at(position: int):
-            """Return a level from the local horizon or pre-horizon state."""
+        def exog_at(position: int):
+            """Return the level exogenous regression contribution."""
+            t = time_values[position]
+            val = 0.0 * output_units
+            for index, (variable, declared_units) in enumerate(exogenous, start=1):
+                try:
+                    normalized_input = (
+                        pyunits.convert(variable[t], declared_units) / declared_units
+                    )
+                except UnitsError as exc:
+                    raise FlexConfigError(
+                        f"ARIMA input {exog_names[index - 1]!r} declares "
+                        f"{declared_units!s}, incompatible with its model units "
+                        f"{pyunits.get_units(variable[t])!s}.",
+                        field="input_variables",
+                        value=exog_names[index - 1],
+                    ) from exc
+                val += block.exog_coefs[index] * normalized_input * output_units
+            return val
+
+        def eta_at(position: int):
+            """Return disturbance level from local horizon or pre-horizon state."""
             if position >= 0:
-                return pyunits.convert(target[time_values[position]], output_units)
+                y_val = pyunits.convert(target[time_values[position]], output_units)
+                return y_val - exog_at(position)
             history_index = len(y_history) + position
             if history_index < 0:
                 raise FlexConfigError(
-                    f"ARIMA level lag at local position {position} exceeds "
+                    f"ARIMA disturbance lag at local position {position} exceeds "
                     f"the {len(y_history)} stored y_history values.",
                     field="history.y_values",
                     value=position,
@@ -736,8 +757,8 @@ class ArimaSurrogate(Surrogate):
             return block.initial_y_history[history_index]
 
         def difference_at(position: int):
-            """Return first difference at one local or pre-horizon position."""
-            return level_at(position) - level_at(position - 1)
+            """Return first difference of disturbance at one position."""
+            return eta_at(position) - eta_at(position - 1)
 
         def innovation_at(position: int):
             """Return an innovation from the horizon or pre-horizon state."""
@@ -755,13 +776,14 @@ class ArimaSurrogate(Surrogate):
 
         def body(t):
             position = time_positions[t]
+            current_exog = exog_at(position)
             mean = 0.0 * output_units
             if deterministic_name in coefficient_vars:
                 mean += coefficient_vars[deterministic_name] * output_units
             if p > 0:
                 for lag in range(1, p + 1):
                     lagged = (
-                        level_at(position - lag)
+                        eta_at(position - lag)
                         if d == 0
                         else difference_at(position - lag)
                     )
@@ -769,25 +791,11 @@ class ArimaSurrogate(Surrogate):
             if q > 0:
                 for lag in range(1, q + 1):
                     mean += block.ma_coefs[lag] * innovation_at(position - lag)
-            for index, (variable, declared_units) in enumerate(exogenous, start=1):
-                try:
-                    normalized_input = (
-                        pyunits.convert(variable[t], declared_units) / declared_units
-                    )
-                except UnitsError as exc:
-                    raise FlexConfigError(
-                        f"ARIMA input {exog_names[index - 1]!r} declares "
-                        f"{declared_units!s}, incompatible with its model units "
-                        f"{pyunits.get_units(variable[t])!s}.",
-                        field="input_variables",
-                        value=exog_names[index - 1],
-                    ) from exc
-                mean += block.exog_coefs[index] * normalized_input * output_units
 
             current = block.eps[t]
             if d == 0:
-                return mean + current
-            return level_at(position - 1) + mean + current
+                return current_exog + mean + current
+            return current_exog + eta_at(position - 1) + mean + current
 
         return block, body
 
@@ -824,8 +832,28 @@ class ArimaSurrogate(Surrogate):
                 field="time_index",
                 value=selected_time,
             )
+
+        unit = target.parent_block()
+
+        def exog_val(t):
+            val = 0.0 * output_units
+            for index, name in enumerate(block._exog_names, start=1):
+                variable = unit.resolve_variable(name, field="input_variables")
+                units_string = self.input_variables[name]
+                declared_units = parse_units(units_string)
+                normalized_input = (
+                    pyunits.convert(variable[t], declared_units) / declared_units
+                )
+                val += block.exog_coefs[index] * normalized_input * output_units
+            return val
+
         y_values = [
-            float(pyo.value(pyunits.convert(target[t], output_units) / output_units))
+            float(
+                pyo.value(
+                    pyunits.convert(target[t] - exog_val(t), output_units)
+                    / output_units
+                )
+            )
             for t in block._time_values
         ]
         previous_y = [

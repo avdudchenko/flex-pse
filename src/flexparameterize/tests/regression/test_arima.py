@@ -415,6 +415,176 @@ def test_biogas_surrogate_spec_has_all_keys():
     assert len(data["coefficients"]["exog_coefs"]) == 2  # two exogenous columns
 
 
+# -- cross-validation against statsmodels on real biogas data -----------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "order",
+    [
+        (1, 0, 0),
+        (2, 0, 0),
+        (3, 0, 0),
+        (0, 0, 1),
+        (0, 0, 2),
+        (0, 0, 3),
+        (1, 0, 1),
+        (2, 0, 2),
+        (0, 1, 0),
+        (1, 1, 0),
+        (0, 1, 1),
+        (1, 1, 1),
+        (2, 1, 2),
+    ],
+    ids=[
+        "ar1",
+        "ar2",
+        "ar3",
+        "ma1",
+        "ma2",
+        "ma3",
+        "ar1-ma1",
+        "ar2-ma2",
+        "i1",
+        "ar1-i1",
+        "i1-ma1",
+        "ar1-i1-ma1",
+        "ar2-i1-ma2",
+    ],
+)
+def test_biogas_matches_statsmodels_insample_and_forecast(order):
+    """Direct ARIMA fits and forecasts on real biogas data match statsmodels."""
+    pytest.importorskip("scipy")
+    pytest.importorskip("statsmodels")
+    import warnings
+
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+    if not os.path.exists(_BIO_GAS_PATH):
+        pytest.skip(f"Test data not found at {_BIO_GAS_PATH}")
+
+    df = _bio_gas_dataframe().dropna(
+        subset=["biogas_m3_hour", "feed_volume_kg", "TS_pct"]
+    )
+    n_train = 120
+    n_fcst = 24
+    train_df = df.iloc[:n_train]
+    test_df = df.iloc[n_train : n_train + n_fcst]
+
+    X_train = train_df[["feed_volume_kg", "TS_pct"]]
+    y_train = train_df[["biogas_m3_hour"]]
+    X_test = test_df[["feed_volume_kg", "TS_pct"]]
+
+    p, d, q = order
+    regressor = ArimaRegressor(order=order, max_ar_persistence=None).fit(
+        X_train,
+        y_train,
+        input_units={"feed_volume_kg": "kg", "TS_pct": "%"},
+        output_units="m^3/hr",
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trend = "c" if d == 0 else "c"
+        sm_model = SARIMAX(y_train, exog=X_train, order=order, trend=trend)
+        sm_result = sm_model.fit(disp=False)
+
+    # 1. In-sample level fitted values (skip t=0 Kalman diffuse prior for d=1)
+    offset_in = 1 if d == 1 else 0
+    reg_fitted = regressor.model.fittedvalues_level[offset_in:]
+    sm_fitted = sm_result.fittedvalues.values[offset_in:]
+    valid = ~np.isnan(reg_fitted)
+    in_sample_mape = float(
+        np.mean(
+            np.abs(reg_fitted[valid] - sm_fitted[valid])
+            / np.abs(reg_fitted[valid])
+            * 100
+        )
+    )
+    assert (
+        in_sample_mape < 10.0
+    ), f"ARIMA{order} in-sample MAPE too large: {in_sample_mape:.2f}%"
+
+    # 2. Out-of-sample multi-step forecast
+    reg_fcst = regressor.model.predict(steps=n_fcst, exog=X_test.values)
+    sm_fcst = sm_result.forecast(steps=n_fcst, exog=X_test).values
+    fcst_mape = float(np.mean(np.abs(reg_fcst - sm_fcst) / np.abs(reg_fcst) * 100))
+    assert fcst_mape < 10.0, f"ARIMA{order} forecast MAPE too large: {fcst_mape:.2f}%"
+
+    # 3. In-sample dynamic recursive prediction
+    offset = max(p + d, q) + (1 if d == 1 else 0)
+    steps = n_train - offset
+    reg_dyn = regressor.model.predict(
+        steps=steps,
+        exog=X_train.values[offset:],
+        start=offset,
+        dynamic=True,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sm_dyn = sm_result.predict(
+            start=offset,
+            end=n_train - 1,
+            exog=X_train.values[offset:],
+            dynamic=True,
+        ).values
+    dyn_mape = float(np.mean(np.abs(reg_dyn - sm_dyn) / np.abs(reg_dyn) * 100))
+    assert (
+        dyn_mape < 10.0
+    ), f"ARIMA{order} dynamic in-sample MAPE too large: {dyn_mape:.2f}%"
+
+
+@pytest.mark.unit
+def test_biogas_auto_arima_matches_statsmodels():
+    """auto=True order selection on biogas data matches statsmodels predictions."""
+    pytest.importorskip("scipy")
+    pytest.importorskip("statsmodels")
+    pytest.importorskip("statsforecast")
+    import warnings
+
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+    if not os.path.exists(_BIO_GAS_PATH):
+        pytest.skip(f"Test data not found at {_BIO_GAS_PATH}")
+
+    df = _bio_gas_dataframe().dropna(
+        subset=["biogas_m3_hour", "feed_volume_kg", "TS_pct"]
+    )
+    n_train = 120
+    n_fcst = 24
+    train_df = df.iloc[:n_train]
+    test_df = df.iloc[n_train : n_train + n_fcst]
+
+    X_train = train_df[["feed_volume_kg", "TS_pct"]]
+    y_train = train_df[["biogas_m3_hour"]]
+    X_test = test_df[["feed_volume_kg", "TS_pct"]]
+
+    regressor = ArimaRegressor(
+        auto=True, max_ar_persistence=None, max_p=3, max_q=3, max_d=1
+    ).fit(
+        X_train,
+        y_train,
+        input_units={"feed_volume_kg": "kg", "TS_pct": "%"},
+        output_units="m^3/hr",
+    )
+    assert regressor.fitted is True
+    order = regressor.order
+    assert order is not None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trend = "c" if order[1] == 0 else "c"
+        sm_model = SARIMAX(y_train, exog=X_train, order=order, trend=trend)
+        sm_result = sm_model.fit(disp=False)
+
+    reg_fcst = regressor.model.predict(steps=n_fcst, exog=X_test.values)
+    sm_fcst = sm_result.forecast(steps=n_fcst, exog=X_test).values
+    fcst_mape = float(np.mean(np.abs(reg_fcst - sm_fcst) / np.abs(reg_fcst) * 100))
+    assert (
+        fcst_mape < 10.0
+    ), f"Auto ARIMA{order} forecast MAPE too large: {fcst_mape:.2f}%"
+
+
 # -- validation: non-differenced only -----------------------------------------
 
 
@@ -756,10 +926,10 @@ def test_predict_with_include_mean_false_and_exog():
     ar1 = regressor.coefficients["ar1"]
     beta = regressor.coefficients["feed"]
     manual = []
-    prev = float(y_values[-1])
+    eta_prev = float(y_values[-1]) - beta * float(feed.iloc[-1])
     for i in range(3):
-        prev = ar1 * prev + beta * exog_future[i, 0]
-        manual.append(prev)
+        eta_prev = ar1 * eta_prev
+        manual.append(beta * exog_future[i, 0] + eta_prev)
     assert list(fcst) == pytest.approx(manual, rel=1e-6)
 
 

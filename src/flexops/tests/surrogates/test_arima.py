@@ -397,7 +397,7 @@ def test_body_d0_matches_hand_calculation_and_history_indexing():
     unit.biogas_m3_hour[0].set_value(12.0)
     unit.feed_volume_kg[1].set_value(2.0)
     block.eps[1].set_value(-1.0)
-    assert pyo.value(body(1)) == pytest.approx(7.4)
+    assert pyo.value(body(1)) == pytest.approx(7.2)
 
 
 @pytest.mark.unit
@@ -428,7 +428,7 @@ def test_body_d1_matches_hand_calculation_and_history_indexing():
     unit.biogas_m3_hour[0].set_value(17.1)
     unit.feed_volume_kg[1].set_value(0.0)
     block.eps[1].set_value(0.0)
-    assert pyo.value(body(1)) == pytest.approx(19.32)
+    assert pyo.value(body(1)) == pytest.approx(16.92)
 
 
 @pytest.mark.unit

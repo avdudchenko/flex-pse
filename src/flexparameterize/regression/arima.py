@@ -646,15 +646,24 @@ class ArimaRegressor:
             )
         else:
             time_step_seconds = 3600.0
+
+        if len(self.exogenous_variables) > 0 and self.model._x is not None:
+            beta_vec = np.array(
+                [params.get(col, 0.0) for col in self.exogenous_variables], dtype=float
+            )
+            eta_series = self._y_values - self.model._x @ beta_vec
+        else:
+            eta_series = self._y_values
+
         history = {
             "start_date": training_index[0].isoformat(),
             "time_step_seconds": time_step_seconds,
             "y_values": (
                 np.asarray(
-                    [self._y_values[0]] * (history_prefix - (p + d))
-                    + self._y_values[: p + d].tolist()
+                    [eta_series[0]] * (history_prefix - (p + d))
+                    + eta_series[: p + d].tolist()
                 ).tolist()
-                + np.asarray(self._y_values).tolist()
+                + np.asarray(eta_series).tolist()
             ),
             "eps_values": [0.0] * (history_prefix + d) + residuals.tolist(),
         }
@@ -907,6 +916,8 @@ class _DirectResults:
         has_const: bool,
         has_drift: bool = False,
         y_original: np.ndarray | None = None,
+        x: np.ndarray | None = None,
+        fittedvalues_level: np.ndarray | None = None,
     ) -> None:
         self._params = np.asarray(params, dtype=float)
         self._resid = np.asarray(residuals, dtype=float)
@@ -914,6 +925,12 @@ class _DirectResults:
         self._y = np.asarray(y, dtype=float)
         self._y_original = (
             np.asarray(y_original, dtype=float) if y_original is not None else None
+        )
+        self._x = np.asarray(x, dtype=float) if x is not None else None
+        self._fittedvalues_level_arr = (
+            np.asarray(fittedvalues_level, dtype=float)
+            if fittedvalues_level is not None
+            else None
         )
         self._k_params = k_params
         self._model = _DirectModel(
@@ -951,14 +968,9 @@ class _DirectResults:
 
     @property
     def fittedvalues_level(self) -> np.ndarray:
-        """In-sample fitted values integrated back to the level scale.
-
-        When ``k_diff == 0`` or the original level series is unavailable,
-        this is identical to :attr:`fittedvalues`.  When ``k_diff > 0``
-        and ``y_original`` is present, the differenced fitted values are
-        cumulatively summed and added to the initial level so the result
-        is directly comparable to the original observed ``y``.
-        """
+        """In-sample fitted values integrated back to the level scale."""
+        if self._fittedvalues_level_arr is not None:
+            return self._fittedvalues_level_arr
         if self.model.k_diff == 0 or self._y_original is None:
             return self._fittedvalues
         fitted = np.full(len(self._y_original), np.nan)
@@ -1064,77 +1076,68 @@ class _DirectResults:
         has_drift = getattr(self.model, "has_drift", False)
 
         idx = 0
-        c = float(self._params[idx]) if has_const else 0.0
-        idx += has_const
-        drift = float(self._params[idx]) if has_drift else 0.0
-        idx += has_drift
+        c = float(self._params[idx]) if (has_const or has_drift) else 0.0
+        idx += has_const or has_drift
+
         ar = self._params[idx : idx + p]
         idx += p
         ma = self._params[idx : idx + q]
         idx += q
         n_exog = self._params.shape[0] - idx
-        beta = self._params[idx : idx + n_exog] if n_exog > 0 else np.zeros(n_exog)
+        beta = self._params[idx : idx + n_exog] if n_exog > 0 else np.zeros(0)
+
+        y_source = self._y_original if self._y_original is not None else self._y
+        if n_exog > 0 and self._x is not None:
+            eta_source = y_source - self._x @ beta
+        else:
+            eta_source = y_source
 
         if start is not None:
-            # In-sample dynamic prediction: use training data BEFORE `start`
+            # In-sample dynamic prediction: use disturbance data BEFORE `start`
             # as initial history, then recursively predict forward from `start`.
-            y_source = self._y_original if self._y_original is not None else self._y
             if _d == 0:
-                y_hist = list(y_source[max(0, start - p) : start])
+                eta_hist = list(eta_source[max(0, start - p) : start])
                 eps_hist = list(self._resid[max(0, start - q) : start]) if q > 0 else []
             else:
-                # For d=1, work with original (level) series.
-                # Need at least p+1 history values: y[t-1], y[t-2], ..., y[t-p-1]
-                y_hist = list(y_source[max(0, start - p - 1) : start])
-                # self._resid is aligned to the differenced series (length
-                # nobs = n - d), so a level-index `start` must be shifted by
-                # `_d` before indexing into it.
+                eta_hist = list(eta_source[max(0, start - p - 1) : start])
                 eps_hist = (
                     list(self._resid[max(0, start - q - _d) : start - _d])
                     if q > 0
                     else []
                 )
-                if len(y_hist) < p + 1:
-                    y_hist = list(y_source[: p + 1])
+                if len(eta_hist) < p + 1:
+                    eta_hist = list(eta_source[: p + 1])
             forecasts = []
 
             for step in range(steps):
                 if _d == 0:
-                    ar_part = sum(ar[j] * y_hist[-(j + 1)] for j in range(p))
+                    ar_part = sum(ar[j] * eta_hist[-(j + 1)] for j in range(p))
                     ma_part = (
                         sum(ma[j] * eps_hist[-(j + 1)] for j in range(q))
                         if q > 0 and len(eps_hist) >= q
                         else 0.0
                     )
-                    exog_part = (
-                        sum(beta[k] * exog[step, k] for k in range(n_exog))
-                        if exog is not None
-                        else 0.0
-                    )
-                    drift_part = 0.0
-                    y_hat = c + drift_part + ar_part + ma_part + exog_part
+                    eta_hat = c + ar_part + ma_part
                 else:
-                    # d=1: y[t] = y[t-1] + drift +
-                    # sum(ar[i]*(y[t-i]-y[t-i-1])) + ma + exog
                     ar_diff_part = sum(
-                        ar[j] * (y_hist[-(j + 1)] - y_hist[-(j + 2)]) for j in range(p)
+                        ar[j] * (eta_hist[-(j + 1)] - eta_hist[-(j + 2)])
+                        for j in range(p)
                     )
                     ma_part = (
                         sum(ma[j] * eps_hist[-(j + 1)] for j in range(q))
                         if q > 0 and len(eps_hist) >= q
                         else 0.0
                     )
-                    exog_part = (
-                        sum(beta[k] * exog[step, k] for k in range(n_exog))
-                        if exog is not None
-                        else 0.0
-                    )
-                    drift_part = drift
-                    y_diff_hat = c + drift_part + ar_diff_part + ma_part + exog_part
-                    y_hat = y_hist[-1] + y_diff_hat
+                    eta_hat = eta_hist[-1] + c + ar_diff_part + ma_part
 
+                exog_part = (
+                    sum(beta[k] * exog[step, k] for k in range(n_exog))
+                    if exog is not None and n_exog > 0
+                    else 0.0
+                )
+                y_hat = exog_part + eta_hat
                 forecasts.append(y_hat)
-                y_hist.append(y_hat)
+                eta_hist.append(eta_hat)
                 if q > 0:
                     eps_hist.append(0.0)
 
@@ -1142,45 +1145,34 @@ class _DirectResults:
 
         # Out-of-sample forecast from end of training data
         if _d == 0:
-            y_hist = list(self._y_original[-p:] if p > 0 else [])
+            eta_hist = list(eta_source[-p:] if p > 0 else [])
         else:
-            # For d=1, need actual level values as lags
-            y_hist = list(
-                self._y_original[-(p + 1) :] if p > 0 else self._y_original[-2:]
-            )
+            eta_hist = list(eta_source[-(p + 1) :] if p > 0 else eta_source[-2:])
         eps_hist = list(self._resid[-q:] if q > 0 else [])
         forecasts = []
 
         for step in range(steps):
             if _d == 0:
-                ar_part = sum(ar[j] * y_hist[-(j + 1)] for j in range(p))
+                ar_part = sum(ar[j] * eta_hist[-(j + 1)] for j in range(p))
                 ma_part = sum(ma[j] * eps_hist[-(j + 1)] for j in range(q))
-                exog_part = (
-                    sum(beta[k] * exog[step, k] for k in range(n_exog))
-                    if exog is not None
-                    else 0.0
-                )
-                drift_part = 0.0
-                y_hat = c + drift_part + ar_part + ma_part + exog_part
+                eta_hat = c + ar_part + ma_part
             else:
-                # d=1: y[t] = y[t-1] + drift +
-                # sum(ar[i] * (y[t-i] - y[t-i-1])) + ma + exog
                 ar_diff_part = sum(
-                    ar[j] * (y_hist[-(j + 1)] - y_hist[-(j + 2)]) for j in range(p)
+                    ar[j] * (eta_hist[-(j + 1)] - eta_hist[-(j + 2)]) for j in range(p)
                 )
                 ma_part = sum(ma[j] * eps_hist[-(j + 1)] for j in range(q))
-                exog_part = (
-                    sum(beta[k] * exog[step, k] for k in range(n_exog))
-                    if exog is not None
-                    else 0.0
-                )
-                drift_part = drift
-                y_diff_hat = c + drift_part + ar_diff_part + ma_part + exog_part
-                y_hat = y_hist[-1] + y_diff_hat
+                eta_hat = eta_hist[-1] + c + ar_diff_part + ma_part
 
+            exog_part = (
+                sum(beta[k] * exog[step, k] for k in range(n_exog))
+                if exog is not None and n_exog > 0
+                else 0.0
+            )
+            y_hat = exog_part + eta_hat
             forecasts.append(y_hat)
-            y_hist.append(y_hat)
-            eps_hist.append(0.0)
+            eta_hist.append(eta_hat)
+            if q > 0:
+                eps_hist.append(0.0)
 
         return np.array(forecasts)
 
@@ -1191,13 +1183,11 @@ def _fit_pure_regression(
     exog_names: list[str],
     has_const: bool,
     has_drift: bool,
-) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, np.ndarray]:
     """Fit y = c + drift + Xβ + ε via OLS."""
     n = len(y)
     cols: list[np.ndarray] = []
-    if has_const:
-        cols.append(np.ones(n))
-    if has_drift:
+    if has_const or has_drift:
         cols.append(np.ones(n))
     if x_values is not None and x_values.shape[1] > 0:
         for k in range(x_values.shape[1]):
@@ -1214,12 +1204,12 @@ def _fit_pure_regression(
         c = float(np.mean(y))
         residuals = y - c
         fitted = np.full(n, c)
-        return np.array([]), param_names, residuals, fitted
+        return np.array([]), param_names, residuals, fitted, fitted
 
     X = np.column_stack(cols)
     theta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
     y_hat = X @ theta
-    return theta, param_names, y - y_hat, y_hat
+    return theta, param_names, y - y_hat, y_hat, y_hat
 
 
 def _fit_ar_ols(
@@ -1230,22 +1220,17 @@ def _fit_ar_ols(
     has_const: bool,
     has_drift: bool,
     max_ar_persistence: float | None = None,
-) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray]:
-    """Fit pure AR(p) via OLS, bounded to +/-max_ar_persistence when set."""
+) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, np.ndarray]:
+    """Fit pure AR(p) via OLS without exogenous variables."""
     n = len(y)
     max_lag = p
     T = n - max_lag
 
     cols: list[np.ndarray] = []
-    if has_const:
-        cols.append(np.ones(T))
-    if has_drift:
+    if has_const or has_drift:
         cols.append(np.ones(T))
     for j in range(1, p + 1):
         cols.append(y[max_lag - j : n - j])
-    if x_values is not None and x_values.shape[1] > 0:
-        for k in range(x_values.shape[1]):
-            cols.append(x_values[max_lag:, k])
 
     param_names: list[str] = []
     if has_const:
@@ -1277,7 +1262,7 @@ def _fit_ar_ols(
         residuals[max_lag:] = y_vec - y_hat
         fitted[max_lag:] = y_hat
 
-    return theta, param_names, residuals, fitted
+    return theta, param_names, residuals, fitted, fitted
 
 
 def _arma_residuals(
@@ -1285,6 +1270,7 @@ def _arma_residuals(
     y: np.ndarray,
     x: np.ndarray | None,
     p: int,
+    d: int,
     q: int,
     has_const: bool,
     has_drift: bool,
@@ -1292,44 +1278,42 @@ def _arma_residuals(
 ) -> np.ndarray:
     """Residual function for scipy.optimize.least_squares.
 
-    Computes the mean-equation residual for each observation t:
-        r[t] = y[t] - (c + drift + Σ ar_j·y[t-j-1]
-        + Σ ma_j·ε[t-j-1] + Σ β_k·x[t,k])
-
-    Returns the effective residuals (t >= max(p, q)) as a flat vector for
-    least-squares optimisation.
+    Computes the disturbance regression residual for each observation t:
+        η[t] = y[t] - X[t] @ β
+        z[t] = η[t] (d=0) or Δ η[t] (d=1)
+        r[t] = z[t] - (c + Σ ar_j·z[t-j-1] + Σ ma_j·ε[t-j-1])
     """
-    n = len(y)
     idx = 0
-    c = float(theta[idx]) if has_const else 0.0
-    idx += has_const
-    drift = float(theta[idx]) if has_drift else 0.0
-    idx += has_drift
+    c = float(theta[idx]) if (has_const or has_drift) else 0.0
+    idx += has_const or has_drift
 
     ar = theta[idx : idx + p]
     idx += p
     ma = theta[idx : idx + q]
     idx += q
-    beta = theta[idx : idx + n_exog] if n_exog > 0 else np.zeros(n_exog)
 
+    if n_exog > 0 and x is not None:
+        beta = theta[idx : idx + n_exog]
+        idx += n_exog
+        eta = y - x @ beta
+    else:
+        eta = y
+
+    z = eta if d == 0 else np.diff(eta)
+    n_z = len(z)
     max_lag = max(p, q)
-    eps = np.zeros(n)
+    eps = np.zeros(n_z)
 
-    for t in range(max_lag, n):
+    for t in range(max_lag, n_z):
         ar_part = 0.0
         for j in range(p):
-            ar_part += ar[j] * y[t - j - 1]
+            ar_part += ar[j] * z[t - j - 1]
 
         ma_part = 0.0
         for j in range(q):
             ma_part += ma[j] * eps[t - j - 1]
 
-        exog_part = 0.0
-        for k in range(n_exog):
-            exog_part += beta[k] * x[t, k]
-
-        drift_part = drift
-        eps[t] = y[t] - (c + drift_part + ar_part + ma_part + exog_part)
+        eps[t] = z[t] - (c + ar_part + ma_part)
 
     return eps[max_lag:]
 
@@ -1337,76 +1321,74 @@ def _arma_residuals(
 def _fit_arma_nls(
     y: np.ndarray,
     p: int,
+    d: int,
     q: int,
     x_values: np.ndarray | None,
     exog_names: list[str],
     has_const: bool,
     has_drift: bool,
     max_ar_persistence: float | None = None,
-) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray]:
-    """Fit ARMA(p,q) via nonlinear least squares (Levenberg-Marquardt).
-
-    The initial guess is obtained by OLS on the AR lags + exog (ignoring
-    MA terms), with MA coefficients starting at zero. AR coefficients are
-    bounded to +/-max_ar_persistence when set (this forces the 'trf'
-    solver, since Levenberg-Marquardt does not support bounds).
-    """
+) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, np.ndarray]:
+    """Fit Regression with ARIMA(p,d,q) errors via nonlinear least squares."""
     from scipy.optimize import least_squares
 
     n = len(y)
     n_exog = x_values.shape[1] if x_values is not None else 0
 
-    # Build initial guess via OLS (no MA terms)
-    max_lag = p
-    cols: list[np.ndarray] = []
-    if has_const:
-        cols.append(np.ones(n - max_lag) if max_lag > 0 else np.ones(n))
-    if has_drift:
-        cols.append(np.ones(n - max_lag) if max_lag > 0 else np.ones(n))
-    for j in range(1, p + 1):
-        start = max_lag - j
-        end = n - j
-        if end > start:
-            cols.append(y[start:end])
-    if x_values is not None and n_exog > 0:
-        for k in range(n_exog):
-            cols.append(x_values[max_lag:, k])
+    theta0 = np.zeros((1 if (has_const or has_drift) else 0) + p + q + n_exog)
 
-    theta0 = np.zeros(has_const + has_drift + p + q + n_exog)
-
-    if cols:
-        y_init = y[max_lag:] if max_lag > 0 else y
-        X_init = np.column_stack(cols)
+    # Initial guess: estimate beta via OLS, then estimate AR on resulting disturbance
+    if n_exog > 0 and x_values is not None:
         try:
-            ols_theta, _, _, _ = np.linalg.lstsq(X_init, y_init, rcond=None)
-            idx_ols = 0
-            idx_nls = 0
             if has_const:
-                theta0[idx_nls] = ols_theta[idx_ols]
-                idx_ols += 1
-                idx_nls += 1
-            if has_drift:
-                theta0[idx_nls] = ols_theta[idx_ols]
-                idx_ols += 1
-                idx_nls += 1
-            if p > 0:
-                theta0[idx_nls : idx_nls + p] = ols_theta[idx_ols : idx_ols + p]
-                idx_ols += p
-                idx_nls += p
-            idx_nls += q  # skip MA slots
-            if n_exog > 0:
-                theta0[idx_nls : idx_nls + n_exog] = ols_theta[
-                    idx_ols : idx_ols + n_exog
-                ]
+                X_mat = np.column_stack([np.ones(n), x_values])
+                init_res, _, _, _ = np.linalg.lstsq(X_mat, y, rcond=None)
+                if has_const:
+                    theta0[0] = init_res[0]
+                beta0 = init_res[1:]
+            else:
+                beta0, _, _, _ = np.linalg.lstsq(x_values, y, rcond=None)
+            eta0 = y - x_values @ beta0
         except Exception:
-            if has_const:
-                theta0[0] = float(np.mean(y))
+            beta0 = np.zeros(n_exog)
+            eta0 = y
+    else:
+        beta0 = np.zeros(0)
+        eta0 = y
+
+    z0 = eta0 if d == 0 else np.diff(eta0)
+    n_z = len(z0)
+    max_lag = p
+    if max_lag > 0 and n_z > max_lag:
+        cols = []
+        if (has_const or has_drift) and n_exog == 0:
+            cols.append(np.ones(n_z - max_lag))
+        for j in range(1, p + 1):
+            cols.append(z0[max_lag - j : n_z - j])
+        if cols:
+            try:
+                ar_ols, _, _, _ = np.linalg.lstsq(
+                    np.column_stack(cols), z0[max_lag:], rcond=None
+                )
+                ols_idx = 0
+                if (has_const or has_drift) and n_exog == 0:
+                    theta0[0] = ar_ols[0]
+                    ols_idx = 1
+                ar_offset = 1 if (has_const or has_drift) else 0
+                theta0[ar_offset : ar_offset + p] = ar_ols[ols_idx : ols_idx + p]
+            except Exception:
+                pass
+
+    idx_set = 1 if (has_const or has_drift) else 0
+    idx_set += p + q
+    if n_exog > 0:
+        theta0[idx_set : idx_set + n_exog] = beta0
 
     if max_ar_persistence is None:
         bounds = (-np.inf, np.inf)
         method = "lm"
     else:
-        ar_offset = has_const + has_drift
+        ar_offset = 1 if (has_const or has_drift) else 0
         lb = np.full(theta0.shape, -np.inf)
         ub = np.full(theta0.shape, np.inf)
         lb[ar_offset : ar_offset + p] = -max_ar_persistence
@@ -1417,12 +1399,12 @@ def _fit_arma_nls(
             ub[ar_offset : ar_offset + p],
         )
         bounds = (lb, ub)
-        method = "trf"  # 'lm' does not support bounds
+        method = "trf"
 
     result = least_squares(
         _arma_residuals,
         theta0,
-        args=(y, x_values, p, q, has_const, has_drift, n_exog),
+        args=(y, x_values, p, d, q, has_const, has_drift, n_exog),
         method=method,
         bounds=bounds,
         verbose=0,
@@ -1432,35 +1414,47 @@ def _fit_arma_nls(
     )
     theta_opt = result.x
 
-    # Reconstruct fitted values and residuals from optimal parameters
-    max_lag_final = max(p, q)
-    eps = np.zeros(n)
-    fitted = np.full(n, np.nan)
-
     idx = 0
-    c = float(theta_opt[idx]) if has_const else 0.0
-    idx += has_const
-    drift_val = float(theta_opt[idx]) if has_drift else 0.0
-    idx += has_drift
+    c = float(theta_opt[idx]) if (has_const or has_drift) else 0.0
+    idx += has_const or has_drift
     ar = theta_opt[idx : idx + p]
     idx += p
     ma = theta_opt[idx : idx + q]
     idx += q
-    beta = theta_opt[idx : idx + n_exog] if n_exog > 0 else np.zeros(n_exog)
+    beta = theta_opt[idx : idx + n_exog] if n_exog > 0 else np.zeros(0)
 
-    for t in range(max_lag_final, n):
-        ar_part = sum(ar[j] * y[t - j - 1] for j in range(p))
+    eta_opt = y - (x_values @ beta if n_exog > 0 and x_values is not None else 0)
+    z_opt = eta_opt if d == 0 else np.diff(eta_opt)
+    n_z = len(z_opt)
+    max_lag_final = max(p, q)
+    eps = np.zeros(n_z)
+    fitted_z = np.full(n_z, np.nan)
+
+    for t in range(max_lag_final, n_z):
+        ar_part = sum(ar[j] * z_opt[t - j - 1] for j in range(p))
         ma_part = sum(ma[j] * eps[t - j - 1] for j in range(q))
-        exog_part = (
-            sum(beta[k] * x_values[t, k] for k in range(n_exog)) if n_exog > 0 else 0.0
-        )
-        drift_part = drift_val
-        y_hat = c + drift_part + ar_part + ma_part + exog_part
-        fitted[t] = y_hat
-        eps[t] = y[t] - y_hat
+        z_hat = c + ar_part + ma_part
+        fitted_z[t] = z_hat
+        eps[t] = z_opt[t] - z_hat
 
-    residuals = np.zeros(n)
+    residuals = np.zeros(n_z)
     residuals[max_lag_final:] = eps[max_lag_final:]
+
+    fitted_level = np.full(n, np.nan)
+    if d == 0:
+        exog_full = (
+            x_values @ beta if n_exog > 0 and x_values is not None else np.zeros(n)
+        )
+        fitted_level = exog_full + fitted_z
+    else:
+        fitted_level[0] = y[0]
+        exog_full = (
+            x_values @ beta if n_exog > 0 and x_values is not None else np.zeros(n)
+        )
+        for t in range(1, n):
+            z_idx = t - 1
+            if not np.isnan(fitted_z[z_idx]):
+                fitted_level[t] = exog_full[t] + eta_opt[t - 1] + fitted_z[z_idx]
 
     param_names: list[str] = []
     if has_const:
@@ -1473,7 +1467,7 @@ def _fit_arma_nls(
         param_names.append(f"ma{j}")
     param_names.extend(exog_names)
 
-    return theta_opt, param_names, residuals, fitted
+    return theta_opt, param_names, residuals, fitted_z, fitted_level
 
 
 def _fit_direct(
@@ -1486,41 +1480,11 @@ def _fit_direct(
     include_drift: bool = False,
     max_ar_persistence: float | None = None,
 ) -> _DirectResults:
-    """Fit ARIMA directly via OLS/NLS, matching the Pyomo surrogate's objective.
-
-    Uses ordinary least squares for pure AR(p) models (closed-form) and
-    ``scipy.optimize.least_squares`` (Levenberg-Marquardt) for models with
-    MA terms.  The residual function is exactly the mean ARIMA equation
-    that the Pyomo surrogate implements, so fitted parameters reproduce the
-    surrogate one-to-one.
-
-    Differencing (``d>0``) is applied to ``y_values`` before fitting.  The
-    Pyomo surrogate supports ``d=0`` and ``d=1``; ``d>1`` will raise
-    ``FlexConfigError`` when ``to_surrogate_spec`` is called.
-
-    Args:
-        y_values: Endogenous time-series values.
-        x_df: Exogenous regressor DataFrame, or ``None``.
-        order: ``(p, d, q)`` ARIMA order.
-        seasonal_order: ``(P, D, Q, m)`` seasonal order.  Only
-            non-seasonal ``(0, 0, 0, 0)`` is currently supported.
-        include_mean: Whether to include a constant term.
-        include_drift: Whether to include a drift term.  Only meaningful
-            when ``d=1``.
-        max_ar_persistence: Bounds every AR coefficient to
-            ``[-max_ar_persistence, max_ar_persistence]`` during the fit.
-            ``None`` fits unconstrained.
-
-    Returns:
-        Fitted :class:`_DirectResults`.
-    """
+    """Fit ARIMA directly via OLS/NLS, matching the Pyomo surrogate's objective."""
     p, d, q = order
     P, D, Q, m = seasonal_order
 
     if P > 0 or D > 0 or Q > 0:
-        # Defense in depth: __init__ and the auto=True path both already
-        # reject P>0/D>0/Q>0 before this is ever called; this should be
-        # unreachable via the public API.
         raise FlexConfigError(
             f"Seasonal ARIMA terms are not supported by the direct fit "
             f"backend. Got seasonal_order={seasonal_order}.",
@@ -1532,36 +1496,54 @@ def _fit_direct(
     x_values = x_df.values if x_df is not None else None
     n_exog = x_values.shape[1] if x_values is not None else 0
 
-    if d > 0:
-        y_original = y_values.copy()
-        y_values = np.diff(y_values, n=d)
-        if x_values is not None:
-            x_values = x_values[d:]
-    else:
-        y_original = y_values.copy()
-
     has_const = include_mean and d == 0
     has_drift = d == 1 and (include_mean or include_drift)
     k_params = (1 if has_const else 0) + (1 if has_drift else 0) + p + q + n_exog
 
-    if p == 0 and q == 0:
-        theta, param_names, residuals, fitted = _fit_pure_regression(
-            y_values, x_values, exog_names, has_const, has_drift
-        )
-    elif q == 0:
-        theta, param_names, residuals, fitted = _fit_ar_ols(
-            y_values,
-            p,
-            x_values,
-            exog_names,
-            has_const,
-            has_drift,
-            max_ar_persistence,
-        )
+    y_original = y_values.copy()
+    diff_y = np.diff(y_values, n=d) if d > 0 else y_values
+
+    if n_exog == 0:
+        if p == 0 and q == 0:
+            theta, param_names, residuals, fitted, _ = _fit_pure_regression(
+                diff_y, x_values, exog_names, has_const, has_drift
+            )
+        elif q == 0:
+            theta, param_names, residuals, fitted, _ = _fit_ar_ols(
+                diff_y,
+                p,
+                x_values,
+                exog_names,
+                has_const,
+                has_drift,
+                max_ar_persistence,
+            )
+        else:
+            theta, param_names, residuals, fitted, fitted_level = _fit_arma_nls(
+                y_values,
+                p,
+                d,
+                q,
+                x_values,
+                exog_names,
+                has_const,
+                has_drift,
+                max_ar_persistence,
+            )
+        if p == 0 or q == 0:
+            if d == 1:
+                fitted_level = np.full(len(y_values), np.nan)
+                fitted_level[0] = y_values[0]
+                for t in range(1, len(y_values)):
+                    if not np.isnan(fitted[t - 1]):
+                        fitted_level[t] = y_values[t - 1] + fitted[t - 1]
+            else:
+                fitted_level = fitted
     else:
-        theta, param_names, residuals, fitted = _fit_arma_nls(
+        theta, param_names, residuals, fitted, fitted_level = _fit_arma_nls(
             y_values,
             p,
+            d,
             q,
             x_values,
             exog_names,
@@ -1574,7 +1556,7 @@ def _fit_direct(
         params=theta,
         residuals=residuals,
         fitted_values=fitted,
-        y=y_values,
+        y=diff_y,
         k_params=k_params,
         param_names=param_names,
         k_ar=p,
@@ -1584,6 +1566,8 @@ def _fit_direct(
         has_const=has_const,
         has_drift=has_drift,
         y_original=y_original,
+        x=x_values,
+        fittedvalues_level=fitted_level,
     )
 
 

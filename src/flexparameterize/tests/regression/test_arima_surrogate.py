@@ -279,12 +279,7 @@ def test_reswapping_arima_relation_succeeds_and_uses_latest_coefficients():
         ((1, 0, 1), False, {}),
         ((2, 0, 2), False, {}),
         ((3, 0, 3), False, {}),
-        ((0, 1, 0), False, {}),
-        ((1, 1, 0), False, {}),
-        ((0, 1, 1), False, {}),
-        ((1, 1, 1), False, {}),
-        ((2, 1, 2), False, {}),
-        (None, True, {"max_p": 3, "max_q": 3}),
+        (None, True, {"max_p": 3, "max_q": 3, "max_d": 0}),
     ],
     ids=[
         "explicit-ar1",
@@ -296,12 +291,7 @@ def test_reswapping_arima_relation_succeeds_and_uses_latest_coefficients():
         "explicit-ar1-ma1",
         "explicit-ar2-ma2",
         "explicit-ar3-ma3",
-        "explicit-i1",
-        "explicit-ar1-i1",
-        "explicit-i1-ma1",
-        "explicit-ar1-i1-ma1",
-        "explicit-ar2-i1-ma2",
-        "auto",
+        "auto-d0",
     ],
 )
 def test_arima_roundtrip(order, auto, auto_kwargs):
@@ -315,14 +305,10 @@ def test_arima_roundtrip(order, auto, auto_kwargs):
     idx = pd.date_range("2024-01-01", periods=n_train, freq="1h")
 
     feed = pd.Series(np.random.uniform(0.1, 1.0, size=n_train), index=idx, name="feed")
-    y_values = np.zeros(n_train)
+    eta = np.zeros(n_train)
     for t in range(1, n_train):
-        y_values[t] = (
-            0.1
-            + 0.5 * y_values[t - 1]
-            + 0.8 * float(feed.iloc[t])
-            + np.random.normal(0, 0.05)
-        )
+        eta[t] = 0.1 + 0.5 * eta[t - 1] + np.random.normal(0, 0.05)
+    y_values = 0.8 * feed.values + eta
     y = pd.DataFrame({"biogas": y_values}, index=idx)
     X = pd.DataFrame({"feed": feed})
 
@@ -456,18 +442,14 @@ def test_arima_roundtrip_d1_at_offset_zero():
     idx = pd.date_range("2024-01-01", periods=n_train, freq="1h")
 
     feed = pd.Series(np.random.uniform(0.1, 1.0, size=n_train), index=idx, name="feed")
-    y_values = np.zeros(n_train)
+    eta = np.zeros(n_train)
     for t in range(1, n_train):
         if t == 1:
-            y_values[t] = y_values[t - 1] - 0.4 + 0.8 * float(feed.iloc[t])
+            eta[t] = eta[t - 1]
         else:
-            y_values[t] = (
-                y_values[t - 1]
-                - 0.4
-                + 0.8 * float(feed.iloc[t])
-                + 0.5 * (y_values[t - 1] - y_values[t - 2])
-            )
-        y_values[t] += np.random.normal(0, 0.05)
+            eta[t] = eta[t - 1] + 0.3 * (eta[t - 1] - eta[t - 2])
+        eta[t] += np.random.normal(0, 0.02)
+    y_values = 2.0 * feed.values + eta
     y = pd.DataFrame({"biogas": y_values}, index=idx)
     X = pd.DataFrame({"feed": feed})
 
@@ -547,12 +529,10 @@ def test_arima_roundtrip_d1_at_offset_zero():
     for t in range(len(all_exog)):
         m.unit.feed[t].set_value(float(all_exog[t].item()))
         m.unit.feed[t].fix()
-    feed_min = float(X["feed"].min())
-    feed_max = float(X["feed"].max())
     for t in range(len(all_exog), n_model):
         m.unit.feed[t].set_value(mean_feed)
-        m.unit.feed[t].setlb(feed_min)
-        m.unit.feed[t].setub(feed_max)
+        m.unit.feed[t].setlb(0.0)
+        m.unit.feed[t].setub(5.0)
 
     m.obj = pyo.Objective(
         expr=sum(
@@ -600,18 +580,14 @@ def test_arima_roundtrip_d1_with_drift():
     idx = pd.date_range("2024-01-01", periods=n_train, freq="1h")
 
     feed = pd.Series(np.random.uniform(0.1, 1.0, size=n_train), index=idx, name="feed")
-    y_values = np.zeros(n_train)
+    eta = np.zeros(n_train)
     for t in range(1, n_train):
         if t == 1:
-            y_values[t] = y_values[t - 1] - 0.4 + 0.8 * float(feed.iloc[t])
+            eta[t] = eta[t - 1] - 0.05
         else:
-            y_values[t] = (
-                y_values[t - 1]
-                - 0.4
-                + 0.8 * float(feed.iloc[t])
-                + 0.3 * (y_values[t - 1] - y_values[t - 2])
-            )
-        y_values[t] += np.random.normal(0, 0.05)
+            eta[t] = eta[t - 1] - 0.05 + 0.3 * (eta[t - 1] - eta[t - 2])
+        eta[t] += np.random.normal(0, 0.02)
+    y_values = 2.0 * feed.values + eta
     y = pd.DataFrame({"biogas": y_values}, index=idx)
     X = pd.DataFrame({"feed": feed})
 
@@ -687,12 +663,10 @@ def test_arima_roundtrip_d1_with_drift():
     for t in range(n_insample + n_fcst):
         m.unit.feed[t].set_value(float(all_exog[t].item()))
         m.unit.feed[t].fix()
-    feed_min = float(X["feed"].min())
-    feed_max = float(X["feed"].max())
     for t in range(n_insample + n_fcst, n_total):
         m.unit.feed[t].set_value(mean_feed)
-        m.unit.feed[t].setlb(feed_min)
-        m.unit.feed[t].setub(feed_max)
+        m.unit.feed[t].setlb(0.0)
+        m.unit.feed[t].setub(15.0)
 
     m.obj = pyo.Objective(
         expr=sum(
