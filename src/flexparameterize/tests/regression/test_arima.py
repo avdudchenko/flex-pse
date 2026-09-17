@@ -228,25 +228,107 @@ def test_surrogate_spec_data_contract():
     assert len(data["history"]["eps_values"]) == n
 
 
+# -- to_fit_result / to_surrogate_spec guards ---------------------------------
+
+
 @pytest.mark.unit
-def test_surrogate_spec_seasonal_order_none_without_seasonal():
-    """seasonal_order is ``None`` when no seasonal terms were fitted."""
+def test_surrogate_spec_omits_intercept_without_a_deterministic_term():
+    """include_mean=False emits no intercept key, not an intercept of 0.0.
+
+    The surrogate reads a missing key as "no deterministic term" and builds
+    no Var for it, so emitting 0.0 would fix a parameter the fit never had.
+    """
     pytest.importorskip("scipy")
 
-    rng = np.random.default_rng(4)
+    rng = np.random.default_rng(31)
     n = 80
     idx = pd.date_range("2024-01-01", periods=n, freq="1h")
-    vals = np.cumsum(rng.normal(0, 0.1, size=n))
+    vals = np.zeros(n)
+    for t in range(1, n):
+        vals[t] = 0.4 * vals[t - 1] + rng.normal(0, 0.1)
     y = pd.DataFrame({"y": vals}, index=idx)
 
+    regressor = ArimaRegressor(
+        order=(1, 0, 0), include_mean=False, max_ar_persistence=None
+    ).fit(pd.DataFrame(index=idx), y, output_units="m^3/hr")
+
+    spec = regressor.to_surrogate_spec()
+    assert "intercept" not in spec.data["coefficients"]
+    assert "drift" not in spec.data["coefficients"]
+    assert "const" not in regressor.to_fit_result().coefficients
+    ArimaSurrogate(spec.data)
+
+
+@pytest.mark.unit
+def test_surrogate_spec_keeps_a_zero_valued_fitted_intercept():
+    """A deterministic term that fits to ~0.0 is still reported.
+
+    Its presence is what tells the surrogate to build the Var; only
+    include_mean=False should omit it.
+    """
+    pytest.importorskip("scipy")
+
+    n = 80
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    y = pd.DataFrame({"y": np.zeros(n)}, index=idx)
+
     regressor = ArimaRegressor(order=(1, 0, 0), max_ar_persistence=None).fit(
+        pd.DataFrame(index=idx), y, output_units="m^3/hr"
+    )
+
+    coefficients = regressor.to_surrogate_spec().data["coefficients"]
+    assert coefficients["intercept"] == pytest.approx(0.0)
+    assert regressor.to_fit_result().coefficients["const"] == pytest.approx(0.0)
+
+
+@pytest.mark.unit
+def test_aicc_is_none_when_undefined_instead_of_raising(caplog):
+    """Too few effective rows makes the AICc correction term undefined.
+
+    This used to raise ZeroDivisionError from inside fit() itself, via
+    model_ -> _aicc_from_direct, on a fit the row check accepts.
+    """
+    pytest.importorskip("scipy")
+
+    idx = pd.date_range("2024-01-01", periods=3, freq="1h")
+    y = pd.DataFrame({"y": [1.0, 2.0, 3.5]}, index=idx)
+
+    regressor = ArimaRegressor(order=(0, 0, 0)).fit(pd.DataFrame(index=idx), y)
+
+    assert regressor.fitted is True
+    assert regressor.model_["aicc"] is None
+    assert regressor.fit_diagnostics()["aicc"] is None
+
+
+@pytest.mark.unit
+def test_information_criteria_exclude_zero_padded_residuals():
+    """AIC/BIC/sigma2 must not be diluted by the zero-padded leading lags.
+
+    `resid` keeps its full length for alignment, but the first max(p, q)
+    entries carry no residual; dividing by them understates sigma2.
+    """
+    pytest.importorskip("scipy")
+
+    rng = np.random.default_rng(5)
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    vals = np.zeros(n)
+    for t in range(3, n):
+        vals[t] = 0.5 * vals[t - 1] + rng.normal(0, 0.1)
+    y = pd.DataFrame({"y": vals}, index=idx)
+
+    regressor = ArimaRegressor(order=(3, 0, 0), max_ar_persistence=None).fit(
         pd.DataFrame(index=idx), y
     )
-    spec = regressor.to_surrogate_spec()
-    assert spec.data.get("seasonal_order") is None
+    model = regressor.model
 
-
-# -- to_fit_result / to_surrogate_spec guards ---------------------------------
+    assert len(model.resid) == n
+    assert model.nobs_effective == n - 3
+    assert len(model.effective_resid) == n - 3
+    expected_sigma2 = float(np.sum(model.effective_resid**2)) / (n - 3)
+    assert model.sigma2 == pytest.approx(expected_sigma2)
+    # Padding-inclusive variance is strictly smaller, so this pins direction.
+    assert model.sigma2 > float(np.sum(model.resid**2)) / n
 
 
 @pytest.mark.unit
@@ -485,7 +567,7 @@ def test_biogas_matches_statsmodels_insample_and_forecast(order):
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        trend = "c" if d == 0 else "c"
+        trend = "c"
         sm_model = SARIMAX(y_train, exog=X_train, order=order, trend=trend)
         sm_result = sm_model.fit(disp=False)
 
@@ -573,7 +655,7 @@ def test_biogas_auto_arima_matches_statsmodels():
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        trend = "c" if order[1] == 0 else "c"
+        trend = "c"
         sm_model = SARIMAX(y_train, exog=X_train, order=order, trend=trend)
         sm_result = sm_model.fit(disp=False)
 

@@ -216,6 +216,40 @@ def test_validate_rejects_history_prefix_length_mismatch(field, values):
 
 
 @pytest.mark.unit
+def test_validate_rejects_history_shorter_than_max_p_d_q():
+    """History must cover max(p+d, q), which is what build() slices.
+
+    With q > p+d the old check only demanded p+d y_values, so a too-short
+    history passed validation and failed later inside build() with a
+    misleading "same number of modeled points" message.
+    """
+    data = _arima_data(p=0, d=0, q=2)
+    data["history"]["y_values"] = []
+
+    with pytest.raises(FlexConfigError, match=r"max\(p\+d, q\)=2"):
+        ArimaSurrogate(data)
+
+
+@pytest.mark.unit
+def test_validate_accepts_history_equal_to_max_p_d_q():
+    """A history of exactly max(p+d, q) values is sufficient."""
+    data = _arima_data(p=0, d=0, q=2)
+    assert len(data["history"]["y_values"]) == 2
+    assert len(data["history"]["eps_values"]) == 2
+
+    ArimaSurrogate(data)
+
+
+@pytest.mark.unit
+def test_validate_skips_history_length_rule_in_regression_mode():
+    """Regression mode supplies no history at all, so the rule cannot fire."""
+    data = _arima_data(p=1, d=1, q=3)
+    del data["history"]
+
+    ArimaSurrogate(data)
+
+
+@pytest.mark.unit
 def test_validate_rejects_intercept_for_d1():
     data = _arima_data(d=1)
     data["coefficients"]["intercept"] = 1.0
@@ -281,6 +315,7 @@ def test_build_creates_fixed_coefficients_state_and_innovations():
     assert all(block.initial_eps_history[h].fixed for h in block.initial_eps_history)
     assert all(block.eps[t].fixed and block.eps[t].value == 0 for t in block.eps)
     assert not hasattr(block, "eps_constraint")
+    assert not hasattr(block, "innovation_square")
 
 
 @pytest.mark.unit
@@ -659,9 +694,7 @@ def test_get_surrogate_spec_extracts_final_state():
     for t, value in enumerate((0.1, 0.2, 0.3)):
         block.eps[t].set_value(value)
 
-    state = surrogate.get_surrogate_spec(
-        block, unit.biogas_m3_hour, unit.biogas_m3_hour.index_set()
-    )
+    state = surrogate.get_surrogate_spec(block, unit.biogas_m3_hour)
 
     assert set(state) == {
         "input_variables",
@@ -683,7 +716,7 @@ def test_get_surrogate_spec_omits_zero_order_coefficient_keys():
         unit.biogas_m3_hour[t].set_value(float(t + 1.0))
         block.eps[t].set_value(0.0)
 
-    state = surrogate.get_surrogate_spec(block, unit.biogas_m3_hour, [0, 1])
+    state = surrogate.get_surrogate_spec(block, unit.biogas_m3_hour)
 
     assert state["coefficients"]["order"] == [0, 0, 0]
     assert "ar_coefs" not in state["coefficients"]
@@ -721,7 +754,7 @@ def test_get_surrogate_spec_preserves_solved_eps_values_for_next_horizon():
         unit.biogas_m3_hour[t].set_value(float(t + 1.0))
         block.eps[t].set_value(value)
 
-    state = surrogate.get_surrogate_spec(block, unit.biogas_m3_hour, [0, 1, 2])
+    state = surrogate.get_surrogate_spec(block, unit.biogas_m3_hour)
 
     assert state["history"]["eps_values"] == pytest.approx([0.0, 0.0, 0.5, -0.25, 0.75])
 
@@ -737,23 +770,13 @@ def test_get_surrogate_spec_roundtrip_preserves_equation():
     first = pyo.value(body(0))
     unit.biogas_m3_hour[0].set_value(first)
 
-    state = surrogate.get_surrogate_spec(block, unit.biogas_m3_hour, [0])
+    state = surrogate.get_surrogate_spec(block, unit.biogas_m3_hour)
     rebuilt = ArimaSurrogate(state)
     block2, body2 = rebuilt.build(unit, unit.biogas_m3_hour)
     block2.eps[0].set_value(0.0)
 
     expected = 7.0 + 0.2 + 0.4 * (7.0 - 5.0) + 0.3 * 0.25
     assert pyo.value(body2(0)) == pytest.approx(expected)
-
-
-@pytest.mark.unit
-def test_get_surrogate_spec_rejects_noncontiguous_state_history():
-    _m, unit = _make_unit(n_points=3)
-    surrogate = ArimaSurrogate(_arima_data(p=1))
-    block, _body = surrogate.build(unit, unit.biogas_m3_hour)
-
-    with pytest.raises(FlexConfigError, match="contiguous prefix"):
-        surrogate.get_surrogate_spec(block, unit.biogas_m3_hour, [0, 2])
 
 
 @pytest.mark.unit

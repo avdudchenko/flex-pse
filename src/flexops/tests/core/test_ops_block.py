@@ -1671,10 +1671,9 @@ class _DispatchSurrogate(Surrogate):
         elif self._objective == "fallback":
             block.get_objective = lambda **kwargs: kwargs.get("value", 2.0)
         if self._has_spec:
-            self.get_surrogate_spec = lambda block, target, time_index: {
+            self.get_surrogate_spec = lambda block, target: {
                 "block": block,
                 "target": target,
-                "time_index": list(time_index),
             }
         return block, lambda t: 1.0 * output_units
 
@@ -1688,7 +1687,8 @@ def test_get_surrogate_spec_dispatches_named_and_default_relation():
     named = unit.get_surrogate_spec("flow_relation")
     default = unit.get_surrogate_spec()
 
-    assert named["time_index"] == list(unit.model().time_block.time_index)
+    assert named["target"] is unit.flow_out
+    assert set(named) == {"block", "target"}
     assert default["target"] is unit.flow_out
 
 

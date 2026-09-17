@@ -35,7 +35,8 @@ def _assert_tail_matches_target(pyomo_opt, target_biogas, *, lookback=10):
 # -- cross-validation: Pyomo vs direct fit -----------------------------------
 
 
-@pytest.mark.unit
+@pytest.mark.component
+@pytest.mark.needs_ipopt
 def test_pyomo_matches_direct_fit_for_multiple_arima_orders():
     """Pyomo surrogate matches ArimaRegressor predictions for multiple orders."""
     np.random.seed(42)
@@ -191,7 +192,8 @@ def test_pyomo_matches_direct_fit_for_multiple_arima_orders():
 # -- reswap ----------------------------------------------------------------
 
 
-@pytest.mark.unit
+@pytest.mark.component
+@pytest.mark.needs_ipopt
 def test_reswapping_arima_relation_succeeds_and_uses_latest_coefficients():
     """A second re-fit-and-reswap must not raise and must use latest coefficients."""
     n = 60
@@ -416,11 +418,13 @@ def test_arima_roundtrip(order, auto, auto_kwargs):
     inital_point = (
         abs(float(pyomo_insample[0] - direct_insample[0])) / direct_insample[0] * 100
     )
-    instample_delta = np.max((pyomo_insample - direct_insample) / direct_insample) * 100
+    instample_delta = (
+        np.max(np.abs((pyomo_insample - direct_insample) / direct_insample)) * 100
+    )
     print(f"In-sample initial point difference: {inital_point}")
     print(f"pyomo_insample: {pyomo_insample}")
     print(f"direct_insample: {direct_insample}")
-    forcast_delta = np.max((pyomo_fcst - direct_fcst) / direct_fcst) * 100
+    forcast_delta = np.max(np.abs((pyomo_fcst - direct_fcst) / direct_fcst)) * 100
     assert inital_point < 1e-4, f"In-sample point too high: {inital_point}"
     assert instample_delta < 1e-4, f"In-sample delta too high: {instample_delta}"
     assert forcast_delta < 1e-4, f"Forecast delta too high: {forcast_delta}"

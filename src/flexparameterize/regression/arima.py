@@ -7,11 +7,11 @@ regressors) by directly minimizing the mean-equation residual using
 shape, so every downstream consumer (provenance logging,
 ``emit_model_config``, ``apply_to_model``) works without change.
 
-Only the ``[parameterize]`` extra is required: ``scipy`` is a core
-runtime dependency and ``statsforecast`` is used only when ``auto=True``
-for order selection; the final parameter fit uses the direct
-OLS / Levenberg-Marquardt backend that minimizes the exact residual the
-Pyomo surrogate implements.
+``scipy`` is a core runtime dependency, so an explicit ``order`` needs no
+extra. ``statsforecast`` ships in the ``[parameterize]`` extra and is used
+only when ``auto=True``, for order selection; the final parameter fit
+always uses the direct OLS / Levenberg-Marquardt backend that minimizes
+the exact residual the Pyomo surrogate implements.
 
 **Restriction**: ``d`` may be ``0`` or ``1``; seasonal differencing
 (``D``) must be ``0``, and seasonal AR/MA terms (``P>0`` or ``Q>0``) are not
@@ -47,7 +47,7 @@ Typical usage::
         output_units="m^3/hr",
     )
 
-Attributes:
+:class:`ArimaRegressor` attributes:
     model: The fitted :class:`_DirectResults` (or ``None`` before
         :meth:`fit`).
     n_samples: Number of rows the fit used, after dropping nulls.
@@ -72,7 +72,10 @@ import pandas as pd
 
 from flexcore.config.schema import SurrogateSpec, SurrogateType
 from flexcore.exceptions import FlexConfigError, FlexDataError
+from flexcore.logger import get_logger
 from flexparameterize.regression.base import FitResult
+
+_log = get_logger(__name__)
 
 
 class ArimaRegressor:
@@ -141,9 +144,11 @@ class ArimaRegressor:
 
     Raises:
         FlexConfigError: If ``d > 1``, ``D > 0``, or a seasonal AR/MA order
-            (``P > 0`` or ``Q > 0``) is requested, if ``include_drift=True``
-            is requested, or if any fitted AR
-            coefficient exceeds ``max_ar_persistence``.
+            (``P > 0`` or ``Q > 0``) is requested; if ``include_drift=True``
+            is combined with anything other than an explicit ``d=1`` order
+            (including ``auto=True``, where no order is known yet); if
+            ``max_ar_persistence`` is not a number in ``(0, 1]`` or ``None``;
+            or if any fitted AR coefficient exceeds ``max_ar_persistence``.
     """
 
     def __init__(
@@ -264,8 +269,12 @@ class ArimaRegressor:
                 is ``False`` and no ``order`` was supplied, or
                 ``input_units`` is missing an entry for one of ``X``'s
                 columns.
-            FlexDataError: If ``y`` does not hold exactly one column, or
-                fewer than ``order[2] + 1`` rows survive dropping nulls.
+            FlexDataError: If ``y`` does not hold exactly one column, if no
+                rows survive dropping nulls, or if fewer than
+                ``max(p, q) + d + k + 1`` rows survive (where ``k`` is the
+                number of fitted parameters), which would leave the fit
+                rank-deficient. With ``auto=True`` only one row is required,
+                because the order is not yet known.
         """
         if not self._auto and self._order is None:
             raise FlexConfigError(
@@ -422,11 +431,6 @@ class ArimaRegressor:
                         value=val,
                     )
 
-        fitted_values = fitted_model.fittedvalues
-        if isinstance(fitted_values, pd.Series):
-            fitted_values = fitted_values.values
-        self._fitted_values = fitted_values
-
         fitted_level = fitted_model.fittedvalues_level
         valid = ~np.isnan(fitted_level)
         residual_ss = float(np.nansum((y_values[valid] - fitted_level[valid]) ** 2))
@@ -441,13 +445,18 @@ class ArimaRegressor:
         """A dict-like view of the fitted model's key attributes.
 
         Provides ``"coef"``, ``"residuals"``, ``"aic"``, ``"bic"``,
-        ``"aicc"``, ``"loglik"``, and ``"sigma2"`` keys so that any
-        downstream code that accessed ``self.model.model_["..."]``
-        continues to work without change.
+        ``"aicc"``, ``"loglik"``, and ``"sigma2"`` keys.
 
         The direct backend names parameters ``ar1``, ``ma1``, ``const``,
-        and exogenous column names directly, so no name normalisation is
-        needed.
+        ``drift``, and exogenous column names directly, so no name
+        normalisation is needed.
+
+        ``"residuals"`` is the full-length array, whose leading
+        ``max(p, q)`` entries are zero-padded because the mean equation
+        defines no residual there. Every derived statistic (``"aic"``,
+        ``"bic"``, ``"aicc"``, ``"loglik"``, ``"sigma2"``) excludes that
+        padding. ``"aicc"`` is ``None`` when too few effective observations
+        remain for its correction term to be defined.
 
         Raises:
             FlexDataError: If :meth:`fit` has not been called.
@@ -524,7 +533,9 @@ class ArimaRegressor:
         """Return this fit as the shared :class:`~.base.FitResult` shape.
 
         The coefficient map contains:
-        - ``"const"`` when the model has a constant term,
+
+        - ``"const"`` (``d=0``) or ``"drift"`` (``d=1``) when the model has
+          a deterministic term, and neither when it does not,
         - ``"ar.L{j}"`` for each AR lag ``j``,
         - ``"ma.L{j}"`` for each MA lag ``j``,
         - exogenous coefficients keyed by their column name.
@@ -543,17 +554,15 @@ class ArimaRegressor:
         ar_coefs = _collect_lags(params, "ar", p)
         ma_coefs = _collect_lags(params, "ma", q)
         exog_coefs = [params.get(col, 0.0) for col in self.exogenous_variables]
-        const = params.get("const", 0.0)
 
         coefficients = {
             **{f"ar.L{j}": v for j, v in enumerate(ar_coefs, 1)},
             **{f"ma.L{j}": v for j, v in enumerate(ma_coefs, 1)},
             **dict(zip(self.exogenous_variables, exog_coefs, strict=True)),
         }
-        drift = params.get("drift", 0.0)
-        deterministic = const if d == 0 else drift
-        if deterministic != 0.0:
-            coefficients["const" if d == 0 else "drift"] = deterministic
+        deterministic_name = "const" if d == 0 else "drift"
+        if deterministic_name in params:
+            coefficients[deterministic_name] = params[deterministic_name]
 
         return FitResult(
             coefficients=coefficients,
@@ -573,14 +582,21 @@ class ArimaRegressor:
         - ``input_variables``: all fitted exogenous variable names and units.
         - ``output_variables``: the output variable name and its units.
         - ``order``: the fitted ``(p, d, q)`` tuple.
-        - ``intercept``: the fitted level intercept when ``d=0``.
-        - ``drift``: the fitted differenced-equation constant when ``d=1``.
+        - ``intercept``: the fitted level intercept, when ``d=0`` and the
+          fit included a deterministic term. Omitted entirely when
+          ``include_mean=False``, which the surrogate reads as "no
+          intercept" rather than "intercept of zero".
+        - ``drift``: the fitted differenced-equation constant, when ``d=1``
+          and the fit included a deterministic term.
         - ``ar_coefs``: list of AR coefficients in lag order.
         - ``ma_coefs``: list of MA coefficients in lag order.
-                - ``exog_coefs``: list of exogenous coefficients, one per column in
-                    fitted order.
-                - ``initial_state``: final levels and innovations for the next local
-                    horizon.
+        - ``exog_coefs``: list of exogenous coefficients, one per column in
+          fitted order.
+
+        The ``history`` field carries ``start_date``, ``time_step_seconds``,
+        and the disturbance/innovation series the surrogate replays to seed
+        its pre-horizon lags. Because no true pre-sample data exists, the
+        first ``max(p + d, q)`` entries repeat the start of the series.
 
         Returns:
             A :class:`~flexcore.config.schema.SurrogateSpec` of type
@@ -615,25 +631,18 @@ class ArimaRegressor:
         ar_coefs = _collect_lags(params, "ar", p)
         ma_coefs = _collect_lags(params, "ma", q)
         exog_coefs = [params.get(col, 0.0) for col in self.exogenous_variables]
-        const = params.get("const", 0.0)
-        drift = params.get("drift", None)
 
         coefficients: dict[str, object] = {"order": [int(p), int(d), int(q)]}
-        if d == 0:
-            coefficients["intercept"] = float(const)
-        elif drift is not None:
-            coefficients["drift"] = float(drift)
+        if d == 0 and "const" in params:
+            coefficients["intercept"] = float(params["const"])
+        elif d == 1 and "drift" in params:
+            coefficients["drift"] = float(params["drift"])
         if p > 0:
             coefficients["ar_coefs"] = [float(v) for v in ar_coefs]
         if q > 0:
             coefficients["ma_coefs"] = [float(v) for v in ma_coefs]
         if len(self.exogenous_variables) > 0:
             coefficients["exog_coefs"] = [float(v) for v in exog_coefs]
-        # NOT IMPLEMENTED PLACE HOLDER
-        # seasonal_order = None
-        # if self._seasonal_order is not None:
-        #     P, D, Q, m = self._seasonal_order
-        #     seasonal_order = [int(P), int(D), int(Q), int(m)]
 
         residuals = np.asarray(self.model_["residuals"])
         history_prefix = max(p + d, q)
@@ -680,14 +689,18 @@ class ArimaRegressor:
             },
         )
 
-    def fit_diagnostics(self) -> dict[str, float]:
+    def fit_diagnostics(self) -> dict[str, float | None]:
         """Return extended fit statistics from the underlying direct fit result.
 
         Includes AIC, BIC, AICc, log-likelihood, and residual standard
-        deviation alongside the standard ``aic`` and ``rmse``.
+        deviation alongside the standard ``aic`` and ``rmse``. All of them
+        exclude the zero-padded leading lags, so ``n_samples`` here is the
+        number of observations the mean equation defines, which is
+        ``max(p, q)`` fewer than the regressor's ``n_samples``.
 
         Returns:
-            Mapping of diagnostic name to value.
+            Mapping of diagnostic name to value. ``aicc`` is ``None`` when
+            too few effective observations remain to define it.
 
         Raises:
             FlexDataError: If :meth:`fit` has not been called.
@@ -698,14 +711,13 @@ class ArimaRegressor:
                 "fit_diagnostics()."
             )
         m_ = self.model_
-        residuals = m_["residuals"]
-        n = len(residuals)
+        n = self.model.nobs_effective
         params = self._params()
         k = len(params)
         llf = float(m_["loglik"])
         aic = float(m_["aic"])
         bic = float(m_["bic"])
-        aicc = float(m_["aicc"])
+        aicc = m_["aicc"]
         sigma2 = float(m_["sigma2"])
         fitted_level = self.model.fittedvalues_level
         valid = ~np.isnan(fitted_level)
@@ -888,7 +900,9 @@ class _DirectResults:
         params: Fitted parameter vector in the same order as
             ``model.param_names``.
         resid: In-sample residuals, aligned to the differenced series
-            ``y`` (length ``nobs``; leading lags are zero-padded).
+            ``y`` (length ``nobs``; the leading ``max(k_ar, k_ma)`` entries
+            are zero-padded, since the mean equation defines no residual
+            there).
         fittedvalues: In-sample fitted values on the *differenced* scale
             when ``d > 0``; on the level scale when ``d == 0``.
         nobs: Number of effective observations (length of the differenced
@@ -899,6 +913,12 @@ class _DirectResults:
         aic: Akaike information criterion.
         bic: Bayesian information criterion.
         sigma2: Residual variance estimate.
+
+    Note:
+        ``llf``, ``aic``, ``bic``, and ``sigma2`` are all computed over
+        :attr:`effective_resid` -- that is, with the zero-padded leading
+        lags excluded -- so they use ``nobs_effective`` observations rather
+        than ``nobs``.
     """
 
     def __init__(
@@ -914,24 +934,18 @@ class _DirectResults:
         k_diff: int,
         seasonal_order: tuple[int, int, int, int],
         has_const: bool,
-        has_drift: bool = False,
-        y_original: np.ndarray | None = None,
-        x: np.ndarray | None = None,
-        fittedvalues_level: np.ndarray | None = None,
+        has_drift: bool,
+        y_original: np.ndarray,
+        x: np.ndarray | None,
+        fittedvalues_level: np.ndarray,
     ) -> None:
         self._params = np.asarray(params, dtype=float)
         self._resid = np.asarray(residuals, dtype=float)
         self._fittedvalues = np.asarray(fitted_values, dtype=float)
         self._y = np.asarray(y, dtype=float)
-        self._y_original = (
-            np.asarray(y_original, dtype=float) if y_original is not None else None
-        )
+        self._y_original = np.asarray(y_original, dtype=float)
         self._x = np.asarray(x, dtype=float) if x is not None else None
-        self._fittedvalues_level_arr = (
-            np.asarray(fittedvalues_level, dtype=float)
-            if fittedvalues_level is not None
-            else None
-        )
+        self._fittedvalues_level = np.asarray(fittedvalues_level, dtype=float)
         self._k_params = k_params
         self._model = _DirectModel(
             param_names, k_ar, k_ma, k_diff, seasonal_order, has_const, has_drift
@@ -953,8 +967,15 @@ class _DirectResults:
 
         Length equals ``nobs``; leading lags up to ``max(k_ar, k_ma)``
         are zero-padded because no fitted values are defined there.
+        Use :attr:`effective_resid` for the residuals the mean equation
+        actually defines.
         """
         return self._resid
+
+    @property
+    def effective_resid(self) -> np.ndarray:
+        """Residuals with the zero-padded leading lags dropped."""
+        return self._resid[max(self._model.k_ar, self._model.k_ma) :]
 
     @property
     def fittedvalues(self) -> np.ndarray:
@@ -968,26 +989,26 @@ class _DirectResults:
 
     @property
     def fittedvalues_level(self) -> np.ndarray:
-        """In-sample fitted values integrated back to the level scale."""
-        if self._fittedvalues_level_arr is not None:
-            return self._fittedvalues_level_arr
-        if self.model.k_diff == 0 or self._y_original is None:
-            return self._fittedvalues
-        fitted = np.full(len(self._y_original), np.nan)
-        d = int(self.model.k_diff)
-        fitted[:d] = self._y_original[:d]
-        if d == 1:
-            fitted[d:] = self._y_original[d - 1 : -1] + self._fittedvalues[d - 1 :]
-        else:
-            fitted[d:] = self._y_original[d - 1 : -1] + np.cumsum(
-                self._fittedvalues[d - 1 :]
-            )
-        return fitted
+        """In-sample fitted values integrated back to the level scale.
+
+        ``NaN`` wherever the mean equation defines no fitted value.
+        """
+        return self._fittedvalues_level
 
     @property
     def nobs(self) -> int:
-        """Number of effective observations in the fitted series."""
+        """Number of observations in the fitted (differenced) series."""
         return int(len(self._y))
+
+    @property
+    def nobs_effective(self) -> int:
+        """Number of observations the mean equation actually defines.
+
+        This is :attr:`nobs` less the ``max(k_ar, k_ma)`` leading lags that
+        carry no residual, and is the sample size used by :attr:`llf`,
+        :attr:`aic`, :attr:`bic`, and :attr:`sigma2`.
+        """
+        return int(len(self.effective_resid))
 
     @property
     def df_model(self) -> int:
@@ -995,8 +1016,9 @@ class _DirectResults:
         return int(self._k_params)
 
     def _llf(self) -> float:
-        n_eff = len(self._resid)
-        rss = float(np.sum(self._resid**2))
+        resid = self.effective_resid
+        n_eff = len(resid)
+        rss = float(np.sum(resid**2))
         if rss <= 0 or n_eff == 0:
             return -np.inf
         return (
@@ -1007,24 +1029,30 @@ class _DirectResults:
 
     @property
     def llf(self) -> float:
+        """Gaussian log-likelihood over :attr:`effective_resid`."""
         return self._llf()
 
     @property
     def aic(self) -> float:
+        """Akaike information criterion, from :attr:`llf`."""
         k = self.df_model + 1
         return -2.0 * self.llf + 2.0 * k
 
     @property
     def bic(self) -> float:
+        """Bayesian information criterion, penalized by ``nobs_effective``."""
         k = self.df_model + 1
-        n = self.nobs
+        n = self.nobs_effective
+        if n == 0:
+            return np.inf
         return -2.0 * self.llf + k * np.log(n)
 
     @property
     def sigma2(self) -> float:
-        rss = float(np.sum(self._resid**2))
-        n_eff = len(self._resid)
-        return rss / n_eff if n_eff > 0 else 0.0
+        """Residual variance over :attr:`effective_resid`."""
+        resid = self.effective_resid
+        n_eff = len(resid)
+        return float(np.sum(resid**2)) / n_eff if n_eff > 0 else 0.0
 
     def predict(
         self,
@@ -1035,11 +1063,11 @@ class _DirectResults:
     ) -> np.ndarray:
         """Recursive multi-step forecast using the mean equation.
 
-        For ``steps=0`` (or when ``exog`` matches the training length),
-        returns the in-sample fitted values.  For ``steps>0``, forecasts
-        are generated recursively: each predicted value feeds back as the
-        AR lag for the next step, and MA terms are zeroed after the first
-        step (matching the Pyomo surrogate's forecast behaviour).
+        Forecasts are generated recursively: each predicted value feeds
+        back as the AR lag for the next step, and MA terms are zeroed after
+        the first step (matching the Pyomo surrogate's forecast behaviour).
+        ``steps=0`` returns an empty array; use :attr:`fittedvalues` or
+        :attr:`fittedvalues_level` for in-sample values.
 
         Args:
             steps: Number of steps to forecast ahead.
@@ -1056,7 +1084,8 @@ class _DirectResults:
                 prediction using actual observed lags is not implemented.
 
         Returns:
-            Array of forecast values of length ``steps``.
+            Array of ``steps`` forecasts on the level scale of ``y``,
+            including the exogenous contribution when ``exog`` is given.
 
         Raises:
             FlexConfigError: If ``dynamic=False`` is passed.
@@ -1073,7 +1102,7 @@ class _DirectResults:
         q = self.model.k_ma
         _d = self.model.k_diff
         has_const = self.model.has_const
-        has_drift = getattr(self.model, "has_drift", False)
+        has_drift = self.model.has_drift
 
         idx = 0
         c = float(self._params[idx]) if (has_const or has_drift) else 0.0
@@ -1184,7 +1213,23 @@ def _fit_pure_regression(
     has_const: bool,
     has_drift: bool,
 ) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, np.ndarray]:
-    """Fit y = c + drift + Xβ + ε via OLS."""
+    """Fit the no-lag case ``y = c + drift + exog + noise`` via OLS.
+
+    Used when ``p == q == 0``.
+
+    Args:
+        y: Endogenous series (already differenced when ``d > 0``).
+        x_values: Exogenous regressor matrix, or ``None``.
+        exog_names: Column names matching ``x_values``.
+        has_const: Whether to fit a level intercept named ``const``.
+        has_drift: Whether to fit a differenced-equation constant named
+            ``drift``. At most one of ``has_const``/``has_drift`` is set by
+            :func:`_fit_direct`; both share the same column of ones.
+
+    Returns:
+        ``(theta, param_names, residuals, fitted, fitted_level)``. With no
+        regressors at all, ``theta`` is empty and the series mean is used.
+    """
     n = len(y)
     cols: list[np.ndarray] = []
     if has_const or has_drift:
@@ -1221,7 +1266,30 @@ def _fit_ar_ols(
     has_drift: bool,
     max_ar_persistence: float | None = None,
 ) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, np.ndarray]:
-    """Fit pure AR(p) via OLS without exogenous variables."""
+    """Fit a pure AR(p) model by (optionally bounded) linear least squares.
+
+    Only reached when there are no exogenous regressors, so ``x_values``
+    and ``exog_names`` are accepted for a uniform helper signature and are
+    expected to be empty.
+
+    Args:
+        y: Endogenous series (already differenced when ``d > 0``).
+        p: Autoregressive order, at least 1.
+        x_values: Unused; expected to be ``None`` or empty.
+        exog_names: Unused; expected to be empty.
+        has_const: Whether to fit a level intercept named ``const``.
+        has_drift: Whether to fit a differenced-equation constant named
+            ``drift``.
+        max_ar_persistence: When set, bounds every AR coefficient to
+            ``[-max_ar_persistence, max_ar_persistence]`` via
+            ``scipy.optimize.lsq_linear`` instead of an unbounded
+            ``numpy.linalg.lstsq``.
+
+    Returns:
+        ``(theta, param_names, residuals, fitted, fitted_level)``.
+        ``residuals`` has the length of ``y`` with its first ``p`` entries
+        zero-padded; ``fitted`` is ``NaN`` there.
+    """
     n = len(y)
     max_lag = p
     T = n - max_lag
@@ -1329,7 +1397,32 @@ def _fit_arma_nls(
     has_drift: bool,
     max_ar_persistence: float | None = None,
 ) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, np.ndarray]:
-    """Fit Regression with ARIMA(p,d,q) errors via nonlinear least squares."""
+    """Fit regression with ARIMA(p, d, q) errors by nonlinear least squares.
+
+    Minimizes :func:`_arma_residuals` with ``scipy.optimize.least_squares``,
+    starting from an OLS estimate of the exogenous coefficients and an OLS
+    AR fit on the implied disturbance. Uses the ``lm`` method when
+    unbounded and ``trf`` when ``max_ar_persistence`` bounds the AR block.
+
+    Args:
+        y: Endogenous series on the level scale (undifferenced).
+        p: Autoregressive order.
+        d: Differencing order, 0 or 1.
+        q: Moving-average order.
+        x_values: Exogenous regressor matrix, or ``None``.
+        exog_names: Column names matching ``x_values``.
+        has_const: Whether to fit a level intercept named ``const``.
+        has_drift: Whether to fit a differenced-equation constant named
+            ``drift``.
+        max_ar_persistence: When set, bounds every AR coefficient to
+            ``[-max_ar_persistence, max_ar_persistence]``.
+
+    Returns:
+        ``(theta, param_names, residuals, fitted_z, fitted_level)``, where
+        ``fitted_z`` is on the differenced scale and ``fitted_level`` is
+        integrated back to the scale of ``y``. ``residuals`` covers the
+        differenced series with its first ``max(p, q)`` entries zero-padded.
+    """
     from scipy.optimize import least_squares
 
     n = len(y)
@@ -1480,7 +1573,31 @@ def _fit_direct(
     include_drift: bool = False,
     max_ar_persistence: float | None = None,
 ) -> _DirectResults:
-    """Fit ARIMA directly via OLS/NLS, matching the Pyomo surrogate's objective."""
+    """Fit ARIMA directly via OLS/NLS, matching the Pyomo surrogate's objective.
+
+    Dispatches to :func:`_fit_pure_regression`, :func:`_fit_ar_ols`, or
+    :func:`_fit_arma_nls` depending on the order and whether exogenous
+    regressors are present, then wraps the outcome in
+    :class:`_DirectResults`.
+
+    Args:
+        y_values: Endogenous series on the level scale.
+        x_df: Exogenous regressors, or ``None`` for a pure ARIMA.
+        order: ``(p, d, q)``, with ``d`` in ``(0, 1)``.
+        seasonal_order: ``(P, D, Q, m)``; must be trivial in ``P``, ``D``,
+            and ``Q``.
+        include_mean: Whether to fit the deterministic term (``const`` when
+            ``d=0``, ``drift`` when ``d=1``).
+        include_drift: Whether to force the ``d=1`` drift term on.
+        max_ar_persistence: When set, bounds every AR coefficient to
+            ``[-max_ar_persistence, max_ar_persistence]``.
+
+    Returns:
+        The fitted :class:`_DirectResults`.
+
+    Raises:
+        FlexConfigError: If any seasonal AR/MA/differencing term is nonzero.
+    """
     p, d, q = order
     P, D, Q, m = seasonal_order
 
@@ -1571,22 +1688,37 @@ def _fit_direct(
     )
 
 
-def _aicc_from_direct(results: _DirectResults) -> float:
+def _aicc_from_direct(results: _DirectResults) -> float | None:
     """Compute AICc from a :class:`_DirectResults` object.
 
-    Uses the effective sample size (where residuals are defined) for the
-    likelihood and the full sample size for the penalty term.
+    The small-sample correction ``2k(k+1) / (n - k - 1)`` is undefined once
+    the effective sample size ``n`` drops to ``k + 1`` or below, which a
+    short series with a rich order can reach. Rather than raising, this
+    logs a warning and returns ``None``; AICc is reported to the user and
+    never consumed by the fit itself.
 
     Args:
         results: Fitted :class:`_DirectResults`.
 
     Returns:
-        The corrected AIC value.
+        The corrected AIC value, or ``None`` when too few effective
+        observations remain to define the correction term.
     """
     k = results.df_model + 1
-    n = results.nobs
-    aic = float(results.aic)
-    return aic + (2.0 * k * (k + 1)) / (n - k - 1)
+    n = results.nobs_effective
+    denominator = n - k - 1
+    if denominator <= 0:
+        _log.warning(
+            "AICc is undefined for this fit: %d effective observation(s) "
+            "against %d parameter(s) leaves a correction denominator of %d. "
+            "Reporting AICc as None; use AIC or BIC, or fit a lower order "
+            "on more data.",
+            n,
+            k,
+            denominator,
+        )
+        return None
+    return float(results.aic) + (2.0 * k * (k + 1)) / denominator
 
 
 def _auto_select_order(
@@ -1599,8 +1731,10 @@ def _auto_select_order(
 ) -> tuple[tuple[int, int, int], tuple[int, int, int, int] | None]:
     """Use statsforecast AutoARIMA to select the best order.
 
-    ``d`` and ``D`` are forced to 0 regardless of what is passed in
-    ``auto_kwargs``.  The caller is responsible for refitting the returned
+    Seasonal differencing ``D`` defaults to 0, since the backend cannot
+    fit it.  Non-seasonal ``d`` is left to AutoARIMA and only validated
+    afterwards, so pass ``max_d=1`` to keep the search inside what this
+    backend supports.  The caller is responsible for refitting the returned
     order with the direct scipy backend for Pyomo-compatible parameters.
 
     Args:

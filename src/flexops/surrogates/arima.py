@@ -91,7 +91,20 @@ def _require_numeric_list(
     field: str,
     expected_length: int,
 ) -> list[float]:
-    """Validate and normalize a fixed-length list of numeric magnitudes."""
+    """Validate and normalize a fixed-length list of numeric magnitudes.
+
+    Args:
+        value: The candidate list.
+        field: Field name used in error messages.
+        expected_length: Exact required length.
+
+    Returns:
+        The values as a list of floats.
+
+    Raises:
+        FlexConfigError: If ``value`` is not a list of exactly
+            ``expected_length`` numbers.
+    """
     if not isinstance(value, list) or len(value) != expected_length:
         raise FlexConfigError(
             f"ARIMA {field!r} must be a list of {expected_length} numbers, "
@@ -113,7 +126,22 @@ def _require_numeric_list(
 
 
 def _scale_for_time(block, innovation_scale, t):
-    """Return one positive innovation scale carrying declared output units."""
+    """Return one positive innovation scale carrying declared output units.
+
+    Args:
+        block: Bound ARIMA surrogate block, used for its output units.
+        innovation_scale: A scalar, a Pyomo component, or a mapping/indexed
+            component keyed by time. Bare numbers are read as magnitudes in
+            the declared output units.
+        t: Time index to resolve, used for indexed scales and messages.
+
+    Returns:
+        The scale as a quantity in the block's declared output units.
+
+    Raises:
+        FlexConfigError: If an indexed scale has no entry for ``t``, or the
+            resolved scale is unit-incompatible, nonnumeric, or nonpositive.
+    """
     indexed = isinstance(innovation_scale, Mapping) or (
         hasattr(innovation_scale, "is_indexed") and innovation_scale.is_indexed()
     )
@@ -448,20 +476,20 @@ class ArimaSurrogate(Surrogate):
                 field="history.eps_values",
                 expected_length=len(history["eps_values"]),
             )
-            if len(history["y_values"]) < p + d:
-                raise FlexConfigError(
-                    "ARIMA history.y_values must include at least p+d values "
-                    "before the first modeled point.",
-                    field="history.y_values",
-                    value=len(history["y_values"]),
-                )
-            if len(history["eps_values"]) < q:
-                raise FlexConfigError(
-                    "ARIMA history.eps_values must include at least q values "
-                    "before the first modeled point.",
-                    field="history.eps_values",
-                    value=len(history["eps_values"]),
-                )
+            # Both series are stored with the same `max(p + d, q)` prefix
+            # so that a shared offset indexes into either one; build() slices
+            # `p + d` levels and `q` innovations out of that prefix.
+            history_prefix = max(p + d, q)
+            for field_name in ("y_values", "eps_values"):
+                if len(history[field_name]) < history_prefix:
+                    raise FlexConfigError(
+                        f"ARIMA history.{field_name} must include at least "
+                        f"max(p+d, q)={history_prefix} value(s) before the "
+                        f"first modeled point, got "
+                        f"{len(history[field_name])}.",
+                        field=f"history.{field_name}",
+                        value=len(history[field_name]),
+                    )
 
     @property
     def input_variables(self) -> dict[str, str]:
@@ -490,6 +518,13 @@ class ArimaSurrogate(Surrogate):
 
         Returns:
             ``(block, body)`` where ``body(t)`` carries declared output units.
+
+        Raises:
+            FlexConfigError: If ``history`` does not align with the
+                ``TimeBlock`` start date on the model's step grid, if its
+                ``y_values`` and ``eps_values`` imply different numbers of
+                modeled points, or if an input variable's model units are
+                incompatible with the units it declares.
         """
         coefficients = self.data["coefficients"]
         p, d, q = (int(value) for value in coefficients["order"])
@@ -709,11 +744,6 @@ class ArimaSurrogate(Surrogate):
             doc="Current-horizon ARIMA innovations",
         )
         block.eps.fix(0.0)
-        block.innovation_square = pyo.Expression(
-            block.time,
-            rule=lambda b, t: b.eps[t] ** 2,
-            doc="Squared ARIMA innovation before regression normalization",
-        )
 
         block._order = (p, d, q)
         block._exog_names = exog_names
@@ -799,8 +829,21 @@ class ArimaSurrogate(Surrogate):
 
         return block, body
 
-    def get_surrogate_spec(self, block, target, time_index) -> dict:
-        """Extract coefficients and the complete dated solved history."""
+    def get_surrogate_spec(self, block, target) -> dict:
+        """Extract coefficients and the complete dated solved history.
+
+        The returned ``history`` spans the whole local horizon.
+
+        Args:
+            block: The block returned by :meth:`build`, after a solve.
+            target: The time-indexed output variable passed to
+                :meth:`build`.
+
+        Returns:
+            A ``data`` dict in this class's persisted contract, suitable for
+            constructing a fresh :class:`ArimaSurrogate` for the next
+            horizon.
+        """
         p, d, q = block._order
         coefficients: dict[str, object] = {"order": [p, d, q]}
         if p > 0:
@@ -822,25 +865,18 @@ class ArimaSurrogate(Surrogate):
             coefficients[deterministic_name] = float(pyo.value(deterministic_var))
 
         output_units = block._output_units
-        selected_time = list(time_index)
-        expected_prefix = list(block._time_values[: len(selected_time)])
-        if not selected_time or selected_time != expected_prefix:
-            raise FlexConfigError(
-                "ARIMA state extraction time_index must be a non-empty, "
-                "contiguous prefix of the local horizon; "
-                f"got {selected_time}.",
-                field="time_index",
-                value=selected_time,
-            )
-
         unit = target.parent_block()
+        exogenous = [
+            (
+                unit.resolve_variable(name, field="input_variables"),
+                parse_units(self.input_variables[name]),
+            )
+            for name in block._exog_names
+        ]
 
         def exog_val(t):
             val = 0.0 * output_units
-            for index, name in enumerate(block._exog_names, start=1):
-                variable = unit.resolve_variable(name, field="input_variables")
-                units_string = self.input_variables[name]
-                declared_units = parse_units(units_string)
+            for index, (variable, declared_units) in enumerate(exogenous, start=1):
                 normalized_input = (
                     pyunits.convert(variable[t], declared_units) / declared_units
                 )

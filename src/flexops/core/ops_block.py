@@ -1148,9 +1148,8 @@ class OpsBlockData(UnitModelBlockData):
         """Retrieve the solved surrogate spec from the active surrogate block.
 
         After solving a model with a surrogate (e.g. ARIMA), this method
-        extracts the current coefficient values, init_values, and
-        training_y_values from the surrogate block so the user can rebuild
-        or refit with the solved state.
+        extracts the solved coefficients and state from the surrogate block
+        so the user can rebuild or refit from it.
 
         Args:
             relation_name: The relation whose active surrogate spec to
@@ -1158,9 +1157,11 @@ class OpsBlockData(UnitModelBlockData):
                 on this unit.
 
         Returns:
-            A dict with keys ``"coefficients"``, ``"init_values"``, and
-            ``"training_y_values"`` as defined by the surrogate's
-            ``get_surrogate_spec`` implementation.
+            A surrogate ``data`` dict, in whatever contract the surrogate's
+            own ``get_surrogate_spec`` defines. For
+            :class:`~flexops.surrogates.arima.ArimaSurrogate` that is
+            ``"input_variables"``, ``"output_variables"``,
+            ``"coefficients"``, and ``"history"``.
 
         Raises:
             FlexConfigError: If the relation is not registered, has no
@@ -1209,10 +1210,7 @@ class OpsBlockData(UnitModelBlockData):
                 value=record.name,
             )
 
-        time_block = self._find_time_block()
-        return surrogate.get_surrogate_spec(
-            record.surrogate_block, record.target, time_block.time_index
-        )
+        return surrogate.get_surrogate_spec(record.surrogate_block, record.target)
 
     def get_surrogate_objective(
         self,
