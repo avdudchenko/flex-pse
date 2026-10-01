@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from types import MethodType
 
 import numpy as np
 import pandas as pd
@@ -76,6 +77,71 @@ from flexcore.logger import get_logger
 from flexparameterize.regression.base import FitResult
 
 _log = get_logger(__name__)
+
+_FIT_OBJECTIVES = ("equation_error", "output_error")
+_FIT_SOLVERS = ("scipy", "ipopt")
+
+# Invertibility bound applied to the MA block in the ipopt backend. Without
+# it the solver trades the bounded AR block against MA and drives the MA
+# roots outside the unit circle, which makes the innovation recursion those
+# coefficients imply explosive.
+_IPOPT_MA_BOUND = 0.99
+
+
+# Upper bound on the automatically chosen free-run window. The best horizon
+# is the one the caller actually forecasts over, which this module cannot
+# know, so "auto" spans the data up to this cap. The cap matters: measured on
+# 5757 rows, an uncapped full-series window left the objective so flat for
+# d=0 orders that least_squares ground to its evaluation limit -- 120-140 s
+# to remove under 2% of the objective -- while the same fits at 192 steps
+# took under 8 s and scored no worse.
+_AUTO_MAX_HORIZON = 192
+
+
+def _auto_forecast_horizon(n_rows: int, p: int, d: int, q: int) -> int:
+    """Return the default free-run window length for ``n_rows`` of data.
+
+    Prefer passing ``forecast_horizon`` explicitly: the best value is the
+    horizon you intend to forecast over, and no rule here can infer it.
+
+    Intermediate horizons carry a specific hazard worth knowing about. They
+    leave the MA block *weakly* identified rather than unidentified -- the MA
+    gradient becomes large enough to drag those coefficients around but too
+    small to pin them, and in testing they drifted outside the unit circle.
+    A fit that does so is reported through the non-invertibility warning in
+    :meth:`ArimaRegressor.fit` and the ``ma_max_root`` diagnostic.
+
+    Args:
+        n_rows: Number of rows the fit will use.
+        p: Autoregressive order.
+        d: Differencing order.
+        q: Moving-average order.
+
+    Returns:
+        The usable row count capped at ``_AUTO_MAX_HORIZON``, raised if
+        needed so a window outlasts the ``max(p + d, q)`` rows seeding it.
+    """
+    seed = max(p + d, q)
+    usable = max(n_rows - seed, 1)
+    return max(min(usable, _AUTO_MAX_HORIZON), seed + 1)
+
+
+def _ma_max_root(ma_coefs) -> float:
+    """Return the largest MA root magnitude, 0.0 when there is no MA block.
+
+    The MA polynomial ``1 + t1*B + ... + tq*B**q`` is invertible when every
+    root of ``z**q + t1*z**(q-1) + ... + tq`` lies inside the unit circle,
+    so this value is below 1.0 exactly when the fitted MA is invertible.
+
+    Args:
+        ma_coefs: Fitted MA coefficients in lag order.
+
+    Returns:
+        The largest root magnitude.
+    """
+    if len(ma_coefs) == 0:
+        return 0.0
+    return float(np.abs(np.roots([1.0, *ma_coefs])).max())
 
 
 class ArimaRegressor:
@@ -160,6 +226,9 @@ class ArimaRegressor:
         auto: bool = False,
         max_ar_persistence: float | None = 0.85,
         stationary: bool = False,
+        fit_objective: str = "equation_error",
+        forecast_horizon: int | str = "auto",
+        fit_solver: str = "scipy",
         **auto_kwargs: object,
     ) -> None:
         if include_drift and (order is None or order[1] != 1):
@@ -209,7 +278,64 @@ class ArimaRegressor:
                 field="max_ar_persistence",
                 value=max_ar_persistence,
             )
+        if fit_objective not in _FIT_OBJECTIVES:
+            raise FlexConfigError(
+                f"ArimaRegressor fit_objective must be one of "
+                f"{list(_FIT_OBJECTIVES)}, got {fit_objective!r}.",
+                field="fit_objective",
+                value=fit_objective,
+            )
+        if forecast_horizon != "auto" and (
+            isinstance(forecast_horizon, bool)
+            or not isinstance(forecast_horizon, int)
+            or forecast_horizon < 1
+        ):
+            raise FlexConfigError(
+                f"ArimaRegressor forecast_horizon must be a positive int or "
+                f'"auto", got {forecast_horizon!r}.',
+                field="forecast_horizon",
+                value=forecast_horizon,
+            )
+        if fit_objective == "equation_error" and forecast_horizon != "auto":
+            raise FlexConfigError(
+                "ArimaRegressor forecast_horizon only affects an "
+                'output_error fit; with fit_objective="equation_error" it '
+                "would be silently ignored. Drop forecast_horizon or set "
+                'fit_objective="output_error".',
+                field="forecast_horizon",
+                value=forecast_horizon,
+            )
+        if fit_solver not in _FIT_SOLVERS:
+            raise FlexConfigError(
+                f"ArimaRegressor fit_solver must be one of "
+                f"{list(_FIT_SOLVERS)}, got {fit_solver!r}.",
+                field="fit_solver",
+                value=fit_solver,
+            )
+        if fit_solver == "ipopt" and fit_objective != "output_error":
+            raise FlexConfigError(
+                'ArimaRegressor fit_solver="ipopt" only applies to an '
+                "output_error fit; the equation-error fit is a direct "
+                "OLS/least-squares solve with no NLP to hand to a solver. "
+                'Set fit_objective="output_error" or fit_solver="scipy".',
+                field="fit_solver",
+                value=fit_solver,
+            )
+        if fit_solver == "ipopt" and forecast_horizon != "auto":
+            raise FlexConfigError(
+                'ArimaRegressor fit_solver="ipopt" builds one Pyomo model '
+                "over the whole training series, so it cannot window the "
+                "free run and forecast_horizon does not apply. Drop "
+                'forecast_horizon or use fit_solver="scipy".',
+                field="forecast_horizon",
+                value=forecast_horizon,
+            )
 
+        self._fit_solver = fit_solver
+        self._fit_objective = fit_objective
+        self._forecast_horizon = (
+            None if forecast_horizon == "auto" else int(forecast_horizon)
+        )
         self._order = order
         self._seasonal_order = seasonal_order
         self._include_mean = include_mean
@@ -228,6 +354,64 @@ class ArimaRegressor:
         self.input_units: dict[str, str] = {}
         self.output_units: str = ""
         self._fitted: bool = False
+
+    def _resolve_horizon(self, n_rows: int, p: int, d: int, q: int) -> int:
+        """Resolve and remember the free-run window length for this fit.
+
+        An explicit ``forecast_horizon`` is used verbatim; ``"auto"`` is
+        resolved through :func:`_auto_forecast_horizon` once the order is
+        known, so that an auto-selected order still gets a matching horizon.
+
+        Args:
+            n_rows: Number of rows the fit is using.
+            p: Autoregressive order.
+            d: Differencing order.
+            q: Moving-average order.
+
+        Returns:
+            The resolved window length in steps.
+        """
+        if self._forecast_horizon is None:
+            self._forecast_horizon = _auto_forecast_horizon(n_rows, p, d, q)
+        return self._forecast_horizon
+
+    def _theta_refiner(self, y_values, x_values, order):
+        """Return the output-error refinement callback, or ``None``.
+
+        ``None`` means ``_fit_direct`` uses its built-in scipy refinement.
+        The ipopt backend is injected as a callback so that ``_fit_direct``
+        stays free of any Pyomo dependency.
+
+        Args:
+            y_values: Endogenous series the fit is using.
+            x_values: Exogenous regressor matrix, or ``None``.
+            order: ``(p, d, q)``.
+
+        Returns:
+            A ``(theta, has_const, has_drift, n_exog) -> theta`` callable, or
+            ``None``.
+        """
+        if self._fit_objective != "output_error" or self._fit_solver != "ipopt":
+            return None
+
+        def refine(theta, has_const, has_drift, n_exog):
+            return _fit_output_error_ipopt(
+                theta,
+                y_values,
+                x_values,
+                order=order,
+                has_const=has_const,
+                has_drift=has_drift,
+                n_exog=n_exog,
+                exog_names=list(self.exogenous_variables),
+                input_units=dict(self.input_units),
+                output_name=self.output_variable,
+                output_units=self.output_units,
+                training_index=self._training_index,
+                max_ar_persistence=self._max_ar_persistence,
+            )
+
+        return refine
 
     def fit(
         self,
@@ -392,6 +576,11 @@ class ArimaRegressor:
                     include_mean=self._include_mean,
                     include_drift=self._include_drift,
                     max_ar_persistence=self._max_ar_persistence,
+                    fit_objective=self._fit_objective,
+                    forecast_horizon=self._resolve_horizon(len(paired), p, d, q),
+                    refine_theta=self._theta_refiner(
+                        y_values, x_df.values if x_df is not None else None, order
+                    ),
                 )
             else:
                 p, d, q = self._order
@@ -404,6 +593,13 @@ class ArimaRegressor:
                     include_mean=self._include_mean,
                     include_drift=self._include_drift,
                     max_ar_persistence=self._max_ar_persistence,
+                    fit_objective=self._fit_objective,
+                    forecast_horizon=self._resolve_horizon(len(paired), p, d, q),
+                    refine_theta=self._theta_refiner(
+                        y_values,
+                        x_df.values if x_df is not None else None,
+                        (p, d, q),
+                    ),
                 )
 
         self.model = fitted_model
@@ -431,13 +627,34 @@ class ArimaRegressor:
                         value=val,
                     )
 
+        ma_max_root = _ma_max_root(_collect_lags(self.coefficients or {}, "ma", q))
+        if ma_max_root >= 1.0:
+            _log.warning(
+                "ArimaRegressor fitted a non-invertible MA block for "
+                "order=%s: largest MA root magnitude is %.4f, which is not "
+                "inside the unit circle. The innovation recursion such "
+                "coefficients imply is explosive, so the reported one-step "
+                "statistics (rmse, aic, bic, sigma2) and any use of this fit "
+                "outside a zero-innovation forward simulation are unreliable. "
+                "This is most likely with an intermediate forecast_horizon, "
+                "which identifies the MA block weakly rather than not at all; "
+                'try the default forecast_horizon="auto", a lower q, or '
+                'fit_objective="equation_error".',
+                self._order,
+                ma_max_root,
+            )
+
         fitted_level = fitted_model.fittedvalues_level
         valid = ~np.isnan(fitted_level)
         residual_ss = float(np.nansum((y_values[valid] - fitted_level[valid]) ** 2))
         rmse = math.sqrt(residual_ss / max(valid.sum(), 1))
         aic = float(fitted_model.aic)
 
-        self.metrics = {"aic": aic, "rmse": rmse}
+        self.metrics = {
+            "aic": aic,
+            "rmse": rmse,
+            "free_run_rmse": fitted_model.free_run_rmse,
+        }
         return self
 
     @property
@@ -507,6 +724,40 @@ class ArimaRegressor:
     def seasonal_order(self) -> tuple[int, int, int, int] | None:
         """The fitted seasonal order, or ``None`` before :meth:`fit`."""
         return self._seasonal_order
+
+    @property
+    def fit_objective(self) -> str:
+        """The residual this fit minimizes.
+
+        ``"output_error"`` (the default) minimizes windowed free-run error,
+        the criterion the Pyomo surrogate exercises when it simulates
+        forward with its innovations fixed at zero. ``"equation_error"``
+        minimizes one-step-ahead residuals using actual lagged values.
+        """
+        return self._fit_objective
+
+    @property
+    def fit_solver(self) -> str:
+        """The optimizer behind an ``output_error`` fit.
+
+        ``"scipy"`` (the default) uses ``scipy.optimize.least_squares`` on
+        the windowed free-run residual. ``"ipopt"`` instead builds the real
+        :class:`~flexops.surrogates.arima.ArimaSurrogate` over the training
+        series and minimizes the squared output error through it, so the
+        fitted coefficients are optimal for the exact Pyomo equation rather
+        than for a Python transcription of it. Irrelevant to an
+        ``equation_error`` fit, which is a direct least-squares solve.
+        """
+        return self._fit_solver
+
+    @property
+    def forecast_horizon(self) -> int | None:
+        """The free-run window length in steps.
+
+        An explicit horizon is readable immediately; ``"auto"`` resolves
+        during :meth:`fit`, so this is ``None`` until then.
+        """
+        return self._forecast_horizon
 
     @property
     def fitted(self) -> bool:
@@ -644,18 +895,6 @@ class ArimaRegressor:
         if len(self.exogenous_variables) > 0:
             coefficients["exog_coefs"] = [float(v) for v in exog_coefs]
 
-        residuals = np.asarray(self.model_["residuals"])
-        history_prefix = max(p + d, q)
-        training_index = self._training_index
-        if getattr(training_index, "freq", None) is not None:
-            time_step_seconds = float(pd.Timedelta(training_index.freq).total_seconds())
-        elif len(training_index) > 1:
-            time_step_seconds = float(
-                (training_index[1] - training_index[0]).total_seconds()
-            )
-        else:
-            time_step_seconds = 3600.0
-
         if len(self.exogenous_variables) > 0 and self.model._x is not None:
             beta_vec = np.array(
                 [params.get(col, 0.0) for col in self.exogenous_variables], dtype=float
@@ -664,18 +903,15 @@ class ArimaRegressor:
         else:
             eta_series = self._y_values
 
-        history = {
-            "start_date": training_index[0].isoformat(),
-            "time_step_seconds": time_step_seconds,
-            "y_values": (
-                np.asarray(
-                    [eta_series[0]] * (history_prefix - (p + d))
-                    + eta_series[: p + d].tolist()
-                ).tolist()
-                + np.asarray(eta_series).tolist()
-            ),
-            "eps_values": [0.0] * (history_prefix + d) + residuals.tolist(),
-        }
+        history = _history_payload(
+            eta_series,
+            np.asarray(self.model_["residuals"]),
+            p=p,
+            d=d,
+            q=q,
+            start_date=self._training_index[0].isoformat(),
+            time_step_seconds=_step_seconds_from_index(self._training_index),
+        )
 
         return SurrogateSpec(
             surrogate_type=SurrogateType.ARIMA,
@@ -697,6 +933,10 @@ class ArimaRegressor:
         exclude the zero-padded leading lags, so ``n_samples`` here is the
         number of observations the mean equation defines, which is
         ``max(p, q)`` fewer than the regressor's ``n_samples``.
+
+        ``ma_max_root`` is the largest MA root magnitude: below 1.0 the
+        fitted MA block is invertible, at or above it the fit logged a
+        warning and its one-step statistics cannot be trusted.
 
         Returns:
             Mapping of diagnostic name to value. ``aicc`` is ``None`` when
@@ -735,6 +975,9 @@ class ArimaRegressor:
             "n_samples": float(n),
             "sigma2": sigma2,
             "rmse": rmse,
+            "free_run_rmse": self.model.free_run_rmse,
+            "forecast_horizon": float(self.model.forecast_horizon),
+            "ma_max_root": _ma_max_root(_collect_lags(params, "ma", self._order[2])),
         }
 
 
@@ -795,6 +1038,67 @@ def _collect_lags(params: dict[str, float], prefix: str, n: int) -> list[float]:
         A list of ``n`` floats.
     """
     return [params.get(f"{prefix}{j}", 0.0) for j in range(1, n + 1)]
+
+
+def _step_seconds_from_index(training_index) -> float:
+    """Return the sampling step of ``training_index`` in seconds.
+
+    Args:
+        training_index: The index of the fitted rows.
+
+    Returns:
+        The declared frequency when the index carries one, otherwise the
+        gap between the first two rows, falling back to one hour for a
+        single-row index.
+    """
+    if getattr(training_index, "freq", None) is not None:
+        return float(pd.Timedelta(training_index.freq).total_seconds())
+    if len(training_index) > 1:
+        return float((training_index[1] - training_index[0]).total_seconds())
+    return 3600.0
+
+
+def _history_payload(
+    eta_series: np.ndarray,
+    residuals: np.ndarray,
+    *,
+    p: int,
+    d: int,
+    q: int,
+    start_date: str,
+    time_step_seconds: float,
+) -> dict[str, object]:
+    """Build the surrogate ``history`` block from a fitted disturbance series.
+
+    The surrogate replays ``max(p + d, q)`` values ahead of its first
+    modeled point. No true pre-sample data exists, so the prefix repeats the
+    start of the series; both lists are padded to the same prefix length so
+    a single offset indexes into either.
+
+    Args:
+        eta_series: Disturbance series ``y - X @ beta`` on the level scale.
+        residuals: One-step innovations, aligned to the differenced series.
+        p: Autoregressive order.
+        d: Differencing order.
+        q: Moving-average order.
+        start_date: ISO-8601 timestamp of the first fitted row.
+        time_step_seconds: Sampling step in seconds.
+
+    Returns:
+        The ``history`` mapping in the surrogate's persisted contract.
+    """
+    history_prefix = max(p + d, q)
+    eta = np.asarray(eta_series, dtype=float)
+    prefix = [float(eta[0])] * (history_prefix - (p + d)) + [
+        float(value) for value in eta[: p + d]
+    ]
+    return {
+        "start_date": start_date,
+        "time_step_seconds": float(time_step_seconds),
+        "y_values": prefix + [float(value) for value in eta],
+        "eps_values": [0.0] * (history_prefix + d)
+        + [float(value) for value in np.asarray(residuals, dtype=float)],
+    }
 
 
 def _extract_order(fitted_model) -> tuple[int, int, int]:
@@ -905,6 +1209,9 @@ class _DirectResults:
             there).
         fittedvalues: In-sample fitted values on the *differenced* scale
             when ``d > 0``; on the level scale when ``d == 0``.
+        free_run_resid: Windowed free-run residuals, the error the Pyomo
+            surrogate commits when simulating forward.
+        forecast_horizon: Free-run window length in steps.
         nobs: Number of effective observations (length of the differenced
             series when ``d > 0``).
         df_model: Number of fitted parameters, including the constant if
@@ -938,6 +1245,8 @@ class _DirectResults:
         y_original: np.ndarray,
         x: np.ndarray | None,
         fittedvalues_level: np.ndarray,
+        free_run_resid: np.ndarray,
+        forecast_horizon: int,
     ) -> None:
         self._params = np.asarray(params, dtype=float)
         self._resid = np.asarray(residuals, dtype=float)
@@ -946,6 +1255,8 @@ class _DirectResults:
         self._y_original = np.asarray(y_original, dtype=float)
         self._x = np.asarray(x, dtype=float) if x is not None else None
         self._fittedvalues_level = np.asarray(fittedvalues_level, dtype=float)
+        self._free_run_resid = np.asarray(free_run_resid, dtype=float)
+        self._forecast_horizon = int(forecast_horizon)
         self._k_params = k_params
         self._model = _DirectModel(
             param_names, k_ar, k_ma, k_diff, seasonal_order, has_const, has_drift
@@ -994,6 +1305,28 @@ class _DirectResults:
         ``NaN`` wherever the mean equation defines no fitted value.
         """
         return self._fittedvalues_level
+
+    @property
+    def free_run_resid(self) -> np.ndarray:
+        """Windowed free-run residuals at the fitted parameters.
+
+        See :func:`_output_error_residuals`. Reported for both fitting
+        objectives, since it is the error the Pyomo surrogate commits when
+        it simulates forward.
+        """
+        return self._free_run_resid
+
+    @property
+    def free_run_rmse(self) -> float:
+        """Root-mean-square of :attr:`free_run_resid`."""
+        if self._free_run_resid.size == 0:
+            return float("nan")
+        return float(np.sqrt(np.mean(self._free_run_resid**2)))
+
+    @property
+    def forecast_horizon(self) -> int:
+        """Free-run window length, in steps, used for the output-error fit."""
+        return self._forecast_horizon
 
     @property
     def nobs(self) -> int:
@@ -1333,7 +1666,42 @@ def _fit_ar_ols(
     return theta, param_names, residuals, fitted, fitted
 
 
-def _arma_residuals(
+def _unpack_theta(
+    theta: np.ndarray,
+    p: int,
+    q: int,
+    n_exog: int,
+    has_deterministic: bool,
+) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
+    """Split a flat parameter vector into its named blocks.
+
+    The layout is ``[c?, ar_1..ar_p, ma_1..ma_q, beta_1..beta_n_exog]``, and
+    is identical across every fitting helper in this module.
+
+    Args:
+        theta: Flat parameter vector.
+        p: Autoregressive order.
+        q: Moving-average order.
+        n_exog: Number of exogenous regressors.
+        has_deterministic: Whether ``theta`` opens with a constant (the
+            ``const`` intercept when ``d=0``, or the ``drift`` term when
+            ``d=1``).
+
+    Returns:
+        ``(c, ar, ma, beta)``, where ``c`` is 0.0 when there is no
+        deterministic term and the arrays are empty at order zero.
+    """
+    idx = 1 if has_deterministic else 0
+    c = float(theta[0]) if has_deterministic else 0.0
+    ar = theta[idx : idx + p]
+    idx += p
+    ma = theta[idx : idx + q]
+    idx += q
+    beta = theta[idx : idx + n_exog] if n_exog > 0 else np.zeros(0)
+    return c, ar, ma, beta
+
+
+def _one_step_innovations(
     theta: np.ndarray,
     y: np.ndarray,
     x: np.ndarray | None,
@@ -1343,29 +1711,34 @@ def _arma_residuals(
     has_const: bool,
     has_drift: bool,
     n_exog: int,
-) -> np.ndarray:
-    """Residual function for scipy.optimize.least_squares.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Run the one-step mean-equation recursion over the whole series.
 
-    Computes the disturbance regression residual for each observation t:
-        η[t] = y[t] - X[t] @ β
-        z[t] = η[t] (d=0) or Δ η[t] (d=1)
-        r[t] = z[t] - (c + Σ ar_j·z[t-j-1] + Σ ma_j·ε[t-j-1])
+    For each observation, using the *actual* lagged values::
+
+        eta[t] = y[t] - X[t] @ beta
+        z[t]   = eta[t] (d=0) or diff(eta)[t] (d=1)
+        eps[t] = z[t] - (c + sum(ar_j * z[t-j]) + sum(ma_j * eps[t-j]))
+
+    Args:
+        theta: Flat parameter vector (see :func:`_unpack_theta`).
+        y: Endogenous series on the level scale.
+        x: Exogenous regressor matrix, or ``None``.
+        p: Autoregressive order.
+        d: Differencing order, 0 or 1.
+        q: Moving-average order.
+        has_const: Whether ``theta`` opens with a level intercept.
+        has_drift: Whether ``theta`` opens with a differenced-equation
+            constant.
+        n_exog: Number of exogenous regressors.
+
+    Returns:
+        ``(eta, z, eps)``. ``eps`` spans the differenced series with its
+        leading ``max(p, q)`` entries left at zero, since the recursion
+        defines no innovation there.
     """
-    idx = 0
-    c = float(theta[idx]) if (has_const or has_drift) else 0.0
-    idx += has_const or has_drift
-
-    ar = theta[idx : idx + p]
-    idx += p
-    ma = theta[idx : idx + q]
-    idx += q
-
-    if n_exog > 0 and x is not None:
-        beta = theta[idx : idx + n_exog]
-        idx += n_exog
-        eta = y - x @ beta
-    else:
-        eta = y
+    c, ar, ma, beta = _unpack_theta(theta, p, q, n_exog, has_const or has_drift)
+    eta = y - x @ beta if (n_exog > 0 and x is not None) else y
 
     z = eta if d == 0 else np.diff(eta)
     n_z = len(z)
@@ -1383,7 +1756,295 @@ def _arma_residuals(
 
         eps[t] = z[t] - (c + ar_part + ma_part)
 
-    return eps[max_lag:]
+    return eta, z, eps
+
+
+def _arma_residuals(
+    theta: np.ndarray,
+    y: np.ndarray,
+    x: np.ndarray | None,
+    p: int,
+    d: int,
+    q: int,
+    has_const: bool,
+    has_drift: bool,
+    n_exog: int,
+) -> np.ndarray:
+    """Equation-error residual for ``scipy.optimize.least_squares``.
+
+    The one-step-ahead innovations of :func:`_one_step_innovations`, with the
+    undefined leading lags dropped. This is the criterion a classical
+    conditional-least-squares ARIMA fit minimizes.
+
+    Args:
+        theta: Flat parameter vector (see :func:`_unpack_theta`).
+        y: Endogenous series on the level scale.
+        x: Exogenous regressor matrix, or ``None``.
+        p: Autoregressive order.
+        d: Differencing order, 0 or 1.
+        q: Moving-average order.
+        has_const: Whether ``theta`` opens with a level intercept.
+        has_drift: Whether ``theta`` opens with a differenced-equation
+            constant.
+        n_exog: Number of exogenous regressors.
+
+    Returns:
+        The innovations from lag ``max(p, q)`` onward.
+    """
+    _eta, _z, eps = _one_step_innovations(
+        theta, y, x, p, d, q, has_const, has_drift, n_exog
+    )
+    return eps[max(p, q) :]
+
+
+def _output_error_residuals(
+    theta: np.ndarray,
+    y: np.ndarray,
+    x: np.ndarray | None,
+    p: int,
+    d: int,
+    q: int,
+    has_const: bool,
+    has_drift: bool,
+    n_exog: int,
+    horizon: int,
+) -> np.ndarray:
+    """Output-error residual: windowed free-run error.
+
+    The series is cut into consecutive windows of ``horizon`` steps. Each
+    window is seeded from *actual* levels and *actual* one-step innovations,
+    then simulated forward with its own predictions feeding the lags and its
+    innovations held at zero -- exactly what the Pyomo surrogate does when it
+    solves forward with ``eps`` fixed at zero, and exactly what
+    :meth:`_DirectResults.predict` does with ``start`` and ``dynamic=True``.
+
+    Unlike :func:`_arma_residuals`, an error in a parameter that accumulates
+    over the horizon -- above all the ``d=1`` drift term -- is charged its
+    full accumulated cost here rather than its per-step cost.
+
+    A window length of 1 reproduces :func:`_arma_residuals` exactly, since a
+    single step seeded from actual data *is* the one-step residual.
+
+    Args:
+        theta: Flat parameter vector (see :func:`_unpack_theta`).
+        y: Endogenous series on the level scale.
+        x: Exogenous regressor matrix, or ``None``.
+        p: Autoregressive order.
+        d: Differencing order, 0 or 1.
+        q: Moving-average order.
+        has_const: Whether ``theta`` opens with a level intercept.
+        has_drift: Whether ``theta`` opens with a differenced-equation
+            constant.
+        n_exog: Number of exogenous regressors.
+        horizon: Window length in steps, at least 1.
+
+    Returns:
+        Level-scale residuals for every position from ``max(p + d, q)``
+        onward. The exogenous contribution cancels, so each residual is
+        ``eta[t]`` less its simulated value.
+    """
+    c, ar, ma, beta = _unpack_theta(theta, p, q, n_exog, has_const or has_drift)
+    eta, _z, eps = _one_step_innovations(
+        theta, y, x, p, d, q, has_const, has_drift, n_exog
+    )
+    n = len(eta)
+    seed = max(p + d, q)
+    residuals: list[float] = []
+
+    start = seed
+    while start < n:
+        window = min(horizon, n - start)
+        eta_history = list(eta[start - (p + d) : start]) if p + d > 0 else []
+        if q > 0:
+            # eps is indexed on the differenced series, so for d=1 the lag
+            # behind position `start` sits one place earlier than for d=0.
+            stop = start - d
+            lags = list(eps[max(stop - q, 0) : max(stop, 0)])
+            eps_history = [0.0] * (q - len(lags)) + lags
+        else:
+            eps_history = []
+
+        for step in range(window):
+            if d == 0:
+                mean = c + sum(ar[j] * eta_history[-(j + 1)] for j in range(p))
+            else:
+                mean = (
+                    eta_history[-1]
+                    + c
+                    + sum(
+                        ar[j] * (eta_history[-(j + 1)] - eta_history[-(j + 2)])
+                        for j in range(p)
+                    )
+                )
+            mean += sum(ma[j] * eps_history[-(j + 1)] for j in range(q))
+
+            residuals.append(eta[start + step] - mean)
+            eta_history.append(mean)
+            if q > 0:
+                eps_history.append(0.0)
+
+        start += window
+
+    return np.asarray(residuals, dtype=float)
+
+
+def _one_step_report(
+    theta: np.ndarray,
+    y: np.ndarray,
+    x: np.ndarray | None,
+    p: int,
+    d: int,
+    q: int,
+    has_const: bool,
+    has_drift: bool,
+    n_exog: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the one-step residuals and fitted values at ``theta``.
+
+    Reported statistics stay on the one-step basis whichever objective was
+    minimized, so that AIC keeps its usual meaning and stays comparable
+    across fitting modes.
+
+    Args:
+        theta: Flat parameter vector (see :func:`_unpack_theta`).
+        y: Endogenous series on the level scale.
+        x: Exogenous regressor matrix, or ``None``.
+        p: Autoregressive order.
+        d: Differencing order, 0 or 1.
+        q: Moving-average order.
+        has_const: Whether ``theta`` opens with a level intercept.
+        has_drift: Whether ``theta`` opens with a differenced-equation
+            constant.
+        n_exog: Number of exogenous regressors.
+
+    Returns:
+        ``(residuals, fitted_z, fitted_level)``, with ``residuals`` and
+        ``fitted_z`` on the differenced scale and ``fitted_level``
+        integrated back to the scale of ``y``. Positions the mean equation
+        does not define are zero in ``residuals`` and ``NaN`` in the fitted
+        arrays.
+    """
+    _c, _ar, _ma, beta = _unpack_theta(theta, p, q, n_exog, has_const or has_drift)
+    eta, z, eps = _one_step_innovations(
+        theta, y, x, p, d, q, has_const, has_drift, n_exog
+    )
+    n = len(y)
+    n_z = len(z)
+    max_lag = max(p, q)
+
+    fitted_z = np.full(n_z, np.nan)
+    fitted_z[max_lag:] = z[max_lag:] - eps[max_lag:]
+    residuals = np.zeros(n_z)
+    residuals[max_lag:] = eps[max_lag:]
+
+    exog_full = x @ beta if (n_exog > 0 and x is not None) else np.zeros(n)
+    if d == 0:
+        fitted_level = exog_full + fitted_z
+    else:
+        fitted_level = np.full(n, np.nan)
+        fitted_level[0] = y[0]
+        for t in range(1, n):
+            if not np.isnan(fitted_z[t - 1]):
+                fitted_level[t] = exog_full[t] + eta[t - 1] + fitted_z[t - 1]
+
+    return residuals, fitted_z, fitted_level
+
+
+def _least_squares_bounds(
+    theta0: np.ndarray,
+    p: int,
+    has_deterministic: bool,
+    max_ar_persistence: float | None,
+) -> tuple[np.ndarray, tuple, str]:
+    """Build the AR-bounded least-squares setup shared by both objectives.
+
+    Args:
+        theta0: Initial parameter vector.
+        p: Autoregressive order.
+        has_deterministic: Whether ``theta0`` opens with a constant.
+        max_ar_persistence: Bound applied to every AR coefficient, or
+            ``None`` to fit unconstrained.
+
+    Returns:
+        ``(theta0, bounds, method)`` where ``theta0`` has its AR block
+        clipped into the bounds and ``method`` is ``"lm"`` when unbounded or
+        ``"trf"`` when bounded.
+    """
+    if max_ar_persistence is None:
+        return theta0, (-np.inf, np.inf), "lm"
+
+    ar_offset = 1 if has_deterministic else 0
+    lower = np.full(theta0.shape, -np.inf)
+    upper = np.full(theta0.shape, np.inf)
+    lower[ar_offset : ar_offset + p] = -max_ar_persistence
+    upper[ar_offset : ar_offset + p] = max_ar_persistence
+    theta0 = theta0.copy()
+    theta0[ar_offset : ar_offset + p] = np.clip(
+        theta0[ar_offset : ar_offset + p],
+        lower[ar_offset : ar_offset + p],
+        upper[ar_offset : ar_offset + p],
+    )
+    return theta0, (lower, upper), "trf"
+
+
+def _fit_output_error(
+    theta0: np.ndarray,
+    y: np.ndarray,
+    x_values: np.ndarray | None,
+    p: int,
+    d: int,
+    q: int,
+    has_const: bool,
+    has_drift: bool,
+    n_exog: int,
+    horizon: int,
+    max_ar_persistence: float | None,
+) -> np.ndarray:
+    """Refine ``theta0`` by minimizing :func:`_output_error_residuals`.
+
+    Warm-started from the equation-error solution, which is both a good
+    starting point and far cheaper to obtain than a cold solve of the
+    nonconvex free-run objective.
+
+    Args:
+        theta0: Equation-error solution to start from.
+        y: Endogenous series on the level scale.
+        x_values: Exogenous regressor matrix, or ``None``.
+        p: Autoregressive order.
+        d: Differencing order, 0 or 1.
+        q: Moving-average order.
+        has_const: Whether ``theta0`` opens with a level intercept.
+        has_drift: Whether ``theta0`` opens with a differenced-equation
+            constant.
+        n_exog: Number of exogenous regressors.
+        horizon: Free-run window length in steps.
+        max_ar_persistence: Bound applied to every AR coefficient, or
+            ``None``.
+
+    Returns:
+        The refined parameter vector, or ``theta0`` unchanged when there are
+        no free parameters to refine.
+    """
+    from scipy.optimize import least_squares
+
+    if theta0.size == 0:
+        return theta0
+
+    theta0, bounds, method = _least_squares_bounds(
+        theta0, p, has_const or has_drift, max_ar_persistence
+    )
+    result = least_squares(
+        _output_error_residuals,
+        theta0,
+        args=(y, x_values, p, d, q, has_const, has_drift, n_exog, horizon),
+        method=method,
+        bounds=bounds,
+        verbose=0,
+        max_nfev=5000,
+        ftol=1e-8,
+        xtol=1e-8,
+    )
+    return result.x
 
 
 def _fit_arma_nls(
@@ -1477,22 +2138,9 @@ def _fit_arma_nls(
     if n_exog > 0:
         theta0[idx_set : idx_set + n_exog] = beta0
 
-    if max_ar_persistence is None:
-        bounds = (-np.inf, np.inf)
-        method = "lm"
-    else:
-        ar_offset = 1 if (has_const or has_drift) else 0
-        lb = np.full(theta0.shape, -np.inf)
-        ub = np.full(theta0.shape, np.inf)
-        lb[ar_offset : ar_offset + p] = -max_ar_persistence
-        ub[ar_offset : ar_offset + p] = max_ar_persistence
-        theta0[ar_offset : ar_offset + p] = np.clip(
-            theta0[ar_offset : ar_offset + p],
-            lb[ar_offset : ar_offset + p],
-            ub[ar_offset : ar_offset + p],
-        )
-        bounds = (lb, ub)
-        method = "trf"
+    theta0, bounds, method = _least_squares_bounds(
+        theta0, p, has_const or has_drift, max_ar_persistence
+    )
 
     result = least_squares(
         _arma_residuals,
@@ -1507,47 +2155,9 @@ def _fit_arma_nls(
     )
     theta_opt = result.x
 
-    idx = 0
-    c = float(theta_opt[idx]) if (has_const or has_drift) else 0.0
-    idx += has_const or has_drift
-    ar = theta_opt[idx : idx + p]
-    idx += p
-    ma = theta_opt[idx : idx + q]
-    idx += q
-    beta = theta_opt[idx : idx + n_exog] if n_exog > 0 else np.zeros(0)
-
-    eta_opt = y - (x_values @ beta if n_exog > 0 and x_values is not None else 0)
-    z_opt = eta_opt if d == 0 else np.diff(eta_opt)
-    n_z = len(z_opt)
-    max_lag_final = max(p, q)
-    eps = np.zeros(n_z)
-    fitted_z = np.full(n_z, np.nan)
-
-    for t in range(max_lag_final, n_z):
-        ar_part = sum(ar[j] * z_opt[t - j - 1] for j in range(p))
-        ma_part = sum(ma[j] * eps[t - j - 1] for j in range(q))
-        z_hat = c + ar_part + ma_part
-        fitted_z[t] = z_hat
-        eps[t] = z_opt[t] - z_hat
-
-    residuals = np.zeros(n_z)
-    residuals[max_lag_final:] = eps[max_lag_final:]
-
-    fitted_level = np.full(n, np.nan)
-    if d == 0:
-        exog_full = (
-            x_values @ beta if n_exog > 0 and x_values is not None else np.zeros(n)
-        )
-        fitted_level = exog_full + fitted_z
-    else:
-        fitted_level[0] = y[0]
-        exog_full = (
-            x_values @ beta if n_exog > 0 and x_values is not None else np.zeros(n)
-        )
-        for t in range(1, n):
-            z_idx = t - 1
-            if not np.isnan(fitted_z[z_idx]):
-                fitted_level[t] = exog_full[t] + eta_opt[t - 1] + fitted_z[z_idx]
+    residuals, fitted_z, fitted_level = _one_step_report(
+        theta_opt, y, x_values, p, d, q, has_const, has_drift, n_exog
+    )
 
     param_names: list[str] = []
     if has_const:
@@ -1563,6 +2173,253 @@ def _fit_arma_nls(
     return theta_opt, param_names, residuals, fitted_z, fitted_level
 
 
+def _fit_output_error_ipopt(
+    theta0: np.ndarray,
+    y: np.ndarray,
+    x_values: np.ndarray | None,
+    *,
+    order: tuple[int, int, int],
+    has_const: bool,
+    has_drift: bool,
+    n_exog: int,
+    exog_names: list[str],
+    input_units: dict[str, str],
+    output_name: str,
+    output_units: str,
+    training_index,
+    max_ar_persistence: float | None,
+) -> np.ndarray:
+    """Minimize output error through the real Pyomo surrogate, with ipopt.
+
+    Builds the training series as an
+    :class:`~flexops.surrogates.arima.ArimaSurrogate` over a
+    :class:`~flexops.core.time_block.TimeBlock`, frees the coefficients and
+    the pre-horizon state, holds the innovations at zero so the block
+    free-runs, and minimizes ``sum((y[t] - data[t])**2)``. The fitted
+    coefficients are therefore optimal for the exact equation the surrogate
+    will later solve, not for a Python transcription of it.
+
+    Unlike the scipy backend this cannot window the free run -- one model
+    spans the whole series. The pre-horizon state is seeded from data via
+    the surrogate's ``history`` block, matching how the scipy backend seeds
+    each window: leaving it free instead lets the solver fit coefficients
+    that suit its own estimated state and transfer poorly, which measured
+    0.087 free-run rmse against 0.005 for the seeded form. The MA block is
+    bounded to keep the fit invertible; without that bound the solver trades
+    the bounded AR block against MA and drives the MA roots out of the unit
+    circle.
+
+    Args:
+        theta0: Equation-error solution, used as the warm start.
+        y: Endogenous series on the level scale.
+        x_values: Exogenous regressor matrix, or ``None``.
+        order: ``(p, d, q)``.
+        has_const: Whether ``theta0`` opens with a level intercept.
+        has_drift: Whether ``theta0`` opens with a differenced-equation
+            constant.
+        n_exog: Number of exogenous regressors.
+        exog_names: Exogenous column names, in fitted order.
+        input_units: Units of every exogenous column, keyed by name.
+        output_name: Name of the fitted output column.
+        output_units: Units of the fitted output column.
+        training_index: The fitted rows' index; must be a regular
+            ``DatetimeIndex`` so a ``TimeBlock`` grid can be derived.
+        max_ar_persistence: Bound applied to every AR coefficient, or
+            ``None``.
+
+    Returns:
+        The refined parameter vector, in :func:`_unpack_theta` layout.
+
+    Raises:
+        FlexConfigError: If ``flexops`` is unavailable, the output or an
+            input carries no units, or ``training_index`` is not a regular
+            ``DatetimeIndex``.
+    """
+    from dateutil.relativedelta import relativedelta
+
+    try:
+        import pyomo.environ as pyo
+        from pyomo.environ import units as pyunits
+
+        from flexcore.solvers import ProblemClass, get_solver
+        from flexops.core.time_block import TimeBlock
+        from flexops.core.units import parse_units
+        from flexops.surrogates.arima import ArimaSurrogate
+    except ImportError as exc:  # pragma: no cover - flexops is a hard dep
+        raise FlexConfigError(
+            'ArimaRegressor fit_solver="ipopt" requires flexops and pyomo. '
+            'Install the full package or use fit_solver="scipy".'
+        ) from exc
+
+    p, d, q = order
+    if not output_units:
+        raise FlexConfigError(
+            'ArimaRegressor fit_solver="ipopt" builds a real Pyomo '
+            "surrogate, which needs declared units. Pass output_units to "
+            "fit().",
+            field="output_units",
+            value=output_units,
+        )
+    missing_units = [name for name in exog_names if not input_units.get(name)]
+    if missing_units:
+        raise FlexConfigError(
+            'ArimaRegressor fit_solver="ipopt" needs units for every input; '
+            f"{missing_units} have none. Pass input_units to fit().",
+            field="input_units",
+            value=missing_units,
+        )
+    if output_name in exog_names:
+        raise FlexConfigError(
+            f"ArimaRegressor cannot fit output {output_name!r} against an "
+            "input of the same name.",
+            field="output_variables",
+            value=output_name,
+        )
+
+    if not isinstance(training_index, pd.DatetimeIndex) or len(training_index) < 2:
+        raise FlexConfigError(
+            'ArimaRegressor fit_solver="ipopt" needs a regular DatetimeIndex '
+            "of at least two rows to build a TimeBlock grid; got "
+            f"{type(training_index).__name__} of length "
+            f'{len(training_index)}. Use fit_solver="scipy".',
+            field="fit_solver",
+            value="ipopt",
+        )
+    if getattr(training_index, "freq", None) is not None:
+        step_seconds = float(pd.Timedelta(training_index.freq).total_seconds())
+    else:
+        step_seconds = float((training_index[1] - training_index[0]).total_seconds())
+    if step_seconds <= 0:
+        raise FlexConfigError(
+            'ArimaRegressor fit_solver="ipopt" could not derive a positive '
+            f"time step from the training index (got {step_seconds} s).",
+            field="fit_solver",
+            value="ipopt",
+        )
+
+    n = len(y)
+    start = training_index[0].to_pydatetime()
+    end = start + pd.Timedelta(seconds=step_seconds * n).to_pytimedelta()
+
+    model = pyo.ConcreteModel()
+    model.time_block = TimeBlock(
+        start_date=start.isoformat(),
+        end_date=end.isoformat(),
+        time_step=step_seconds * pyunits.s,
+        max_length=relativedelta(seconds=int(step_seconds * (n + 1))),
+    )
+    time_index = list(model.time_block.time_index)
+    if len(time_index) != n:
+        raise FlexConfigError(
+            'ArimaRegressor fit_solver="ipopt" derived a TimeBlock of '
+            f"{len(time_index)} steps for {n} training rows, so the index is "
+            'not on a regular grid. Use fit_solver="scipy".',
+            field="fit_solver",
+            value="ipopt",
+        )
+
+    unit = pyo.Block(concrete=True)
+    model.unit = unit
+    unit.add_component(
+        output_name,
+        pyo.Var(time_index, initialize=0.0, units=parse_units(output_units)),
+    )
+    target = unit.find_component(output_name)
+    for name in exog_names:
+        unit.add_component(
+            name,
+            pyo.Var(time_index, initialize=0.0, units=parse_units(input_units[name])),
+        )
+
+    def _resolve_variable(self, name, field=None):
+        """Stand in for OpsBlockData.resolve_variable for the surrogate."""
+        component = self.find_component(name)
+        if component is None:
+            raise FlexConfigError(
+                f"ARIMA input {name!r} is not on the fitting block.",
+                field=field,
+                value=name,
+            )
+        return component
+
+    unit.resolve_variable = MethodType(_resolve_variable, unit)
+
+    constant, ar, ma, beta = _unpack_theta(theta0, p, q, n_exog, has_const or has_drift)
+    coefficients: dict[str, object] = {"order": [int(p), int(d), int(q)]}
+    if has_const:
+        coefficients["intercept"] = float(constant)
+    elif has_drift:
+        coefficients["drift"] = float(constant)
+    if p > 0:
+        coefficients["ar_coefs"] = [float(v) for v in ar]
+    if q > 0:
+        coefficients["ma_coefs"] = [float(v) for v in ma]
+    if n_exog > 0:
+        coefficients["exog_coefs"] = [float(v) for v in beta]
+
+    eta_series, _z, eps = _one_step_innovations(
+        theta0, y, x_values, p, d, q, has_const, has_drift, n_exog
+    )
+    surrogate = ArimaSurrogate(
+        {
+            "input_variables": {name: input_units[name] for name in exog_names},
+            "output_variables": {output_name: output_units},
+            "coefficients": coefficients,
+            "history": _history_payload(
+                eta_series,
+                eps,
+                p=p,
+                d=d,
+                q=q,
+                start_date=training_index[0].isoformat(),
+                time_step_seconds=step_seconds,
+            ),
+        },
+        max_ar_coeff=max_ar_persistence,
+    )
+    block, body = surrogate.build(unit, target)
+    unit.arima = block
+    unit.fitted = pyo.Constraint(time_index, rule=lambda _b, t: target[t] == body(t))
+
+    for position, t in enumerate(time_index):
+        for index, name in enumerate(exog_names):
+            unit.find_component(name)[t].fix(float(x_values[position, index]))
+        target[t].set_value(float(y[position]))
+
+    block.coefficients.unfix()
+    if q > 0:
+        for index in range(1, q + 1):
+            block.ma_coefs[index].setlb(-_IPOPT_MA_BOUND)
+            block.ma_coefs[index].setub(_IPOPT_MA_BOUND)
+
+    model.objective = pyo.Objective(
+        expr=sum(
+            (target[t] - float(y[position])) ** 2
+            for position, t in enumerate(time_index)
+        )
+    )
+    results = get_solver(problem_class=ProblemClass.NLP, prefer="ipopt").solve(model)
+    if not pyo.check_optimal_termination(results):
+        _log.warning(
+            'ArimaRegressor fit_solver="ipopt" terminated %s rather than '
+            "optimally for order=%s. The returned coefficients are the "
+            "solver's last iterate; check free_run_rmse before using them, "
+            'or refit with fit_solver="scipy".',
+            results.solver.termination_condition,
+            order,
+        )
+
+    fitted = surrogate.get_surrogate_spec(block, target)["coefficients"]
+    deterministic = fitted.get("intercept" if has_const else "drift", 0.0)
+    return np.array(
+        ([float(deterministic)] if (has_const or has_drift) else [])
+        + [float(v) for v in fitted.get("ar_coefs", [])]
+        + [float(v) for v in fitted.get("ma_coefs", [])]
+        + [float(v) for v in fitted.get("exog_coefs", [])],
+        dtype=float,
+    )
+
+
 def _fit_direct(
     y_values: np.ndarray,
     x_df: pd.DataFrame | None,
@@ -1572,6 +2429,9 @@ def _fit_direct(
     include_mean: bool,
     include_drift: bool = False,
     max_ar_persistence: float | None = None,
+    fit_objective: str = "equation_error",
+    forecast_horizon: int = 1,
+    refine_theta=None,
 ) -> _DirectResults:
     """Fit ARIMA directly via OLS/NLS, matching the Pyomo surrogate's objective.
 
@@ -1591,9 +2451,21 @@ def _fit_direct(
         include_drift: Whether to force the ``d=1`` drift term on.
         max_ar_persistence: When set, bounds every AR coefficient to
             ``[-max_ar_persistence, max_ar_persistence]``.
+        fit_objective: ``"equation_error"`` stops at the one-step fit;
+            ``"output_error"`` refines it against
+            :func:`_output_error_residuals`.
+        refine_theta: Optional ``(theta, has_const, has_drift, n_exog) ->
+            theta`` callback used in place of the built-in scipy refinement
+            when ``fit_objective`` is ``"output_error"``. This is how the
+            ipopt backend is injected without this function needing to know
+            about Pyomo.
+        forecast_horizon: Free-run window length in steps. Used by an
+            ``"output_error"`` fit, and for the reported free-run error in
+            either mode.
 
     Returns:
-        The fitted :class:`_DirectResults`.
+        The fitted :class:`_DirectResults`. Reported residuals and fitted
+        values are on the one-step basis under both objectives.
 
     Raises:
         FlexConfigError: If any seasonal AR/MA/differencing term is nonzero.
@@ -1669,6 +2541,46 @@ def _fit_direct(
             max_ar_persistence,
         )
 
+    if fit_objective == "output_error" and theta.size > 0:
+        if refine_theta is not None:
+            theta = refine_theta(theta, has_const, has_drift, n_exog)
+        else:
+            theta = _fit_output_error(
+                theta,
+                y_values,
+                x_values,
+                p,
+                d,
+                q,
+                has_const,
+                has_drift,
+                n_exog,
+                forecast_horizon,
+                max_ar_persistence,
+            )
+        residuals, fitted, fitted_level = _one_step_report(
+            theta, y_values, x_values, p, d, q, has_const, has_drift, n_exog
+        )
+
+    if theta.size > 0:
+        free_run_resid = _output_error_residuals(
+            theta,
+            y_values,
+            x_values,
+            p,
+            d,
+            q,
+            has_const,
+            has_drift,
+            n_exog,
+            forecast_horizon,
+        )
+    else:
+        # No free parameters: _fit_pure_regression centers on the series
+        # mean without exposing it as a coefficient, so there is no theta to
+        # simulate from. The one-step residuals are the whole story.
+        free_run_resid = residuals
+
     return _DirectResults(
         params=theta,
         residuals=residuals,
@@ -1685,6 +2597,8 @@ def _fit_direct(
         y_original=y_original,
         x=x_values,
         fittedvalues_level=fitted_level,
+        free_run_resid=free_run_resid,
+        forecast_horizon=forecast_horizon,
     )
 
 
