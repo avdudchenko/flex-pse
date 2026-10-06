@@ -1742,7 +1742,7 @@ def test_ipopt_history_seed_tracks_the_fitted_exog_coefficients(monkeypatch):
     pytest.importorskip("scipy")
     import pyomo.environ as pyo
 
-    import flexcore.solvers
+    from flexparameterize.regression.utils import arima_utils
 
     n = 250
     idx = pd.date_range("2024-01-01", periods=n, freq="15min")
@@ -1753,7 +1753,7 @@ def test_ipopt_history_seed_tracks_the_fitted_exog_coefficients(monkeypatch):
     X = pd.DataFrame({"feed": feed}, index=idx)
 
     solved = []
-    real_get_solver = flexcore.solvers.get_solver
+    real_get_solver = arima_utils.get_solver
 
     def spying_get_solver(*args, **kwargs):
         solver = real_get_solver(*args, **kwargs)
@@ -1767,7 +1767,7 @@ def test_ipopt_history_seed_tracks_the_fitted_exog_coefficients(monkeypatch):
         solver.solve = solve
         return solver
 
-    monkeypatch.setattr(flexcore.solvers, "get_solver", spying_get_solver)
+    monkeypatch.setattr(arima_utils, "get_solver", spying_get_solver)
     ArimaRegressor(
         order=(1, 1, 0), fit_objective="output_error", fit_solver="ipopt"
     ).fit(X, y, input_units={"feed": "dimensionless"}, output_units="m^3/hr")

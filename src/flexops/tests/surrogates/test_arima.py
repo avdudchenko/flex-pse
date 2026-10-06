@@ -50,7 +50,7 @@ def _make_unit(n_points: int = 5, start_date: str = "2025-01-01T00:00:00"):
             name,
             pyo.Var(m.time_block.time_index, initialize=0.0, units=units),
         )
-        m.unit.register_io_variable(getattr(m.unit, name), role="input")
+        m.unit.register_io_variable(m.unit.find_component(name), role="input")
 
     return m, m.unit
 
@@ -314,8 +314,8 @@ def test_build_creates_fixed_coefficients_state_and_innovations():
     assert all(block.initial_y_history[h].fixed for h in block.initial_y_history)
     assert all(block.initial_eps_history[h].fixed for h in block.initial_eps_history)
     assert all(block.eps[t].fixed and block.eps[t].value == 0 for t in block.eps)
-    assert not hasattr(block, "eps_constraint")
-    assert not hasattr(block, "innovation_square")
+    assert block.find_component("eps_constraint") is None
+    assert block.find_component("innovation_square") is None
 
 
 @pytest.mark.unit
@@ -526,7 +526,7 @@ def test_swap_relation_adds_one_equation_without_residual_constraint():
 
     assert block.fitted.is_indexed()
     assert len(block.fitted) == len(unit.biogas_m3_hour)
-    assert not hasattr(block, "eps_constraint")
+    assert block.find_component("eps_constraint") is None
 
 
 @pytest.mark.unit

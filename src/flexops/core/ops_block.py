@@ -1270,11 +1270,11 @@ class OpsBlockData(UnitModelBlockData):
             record = records[0]
 
         block = record.surrogate_block
-        objective = getattr(block, "get_regression_objective", None)
+        objective = block.find_component("get_regression_objective")
         if callable(objective):
             return objective(**kwargs)
 
-        objective = getattr(block, "get_objective", None)
+        objective = block.find_component("get_objective")
         if callable(objective):
             return objective(**kwargs)
 

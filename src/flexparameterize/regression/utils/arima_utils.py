@@ -26,10 +26,18 @@ from types import MethodType
 
 import numpy as np
 import pandas as pd
+import pyomo.environ as pyo
+from dateutil.relativedelta import relativedelta
+from pyomo.environ import units as pyunits
+from scipy.optimize import least_squares
 from scipy.signal import lfilter, lfiltic
 
 from flexcore.exceptions import FlexConfigError, FlexDataError
 from flexcore.logger import get_logger
+from flexcore.solvers import ProblemClass, get_solver
+from flexops.core.time_block import TimeBlock
+from flexops.core.units import parse_units
+from flexops.surrogates.arima import ArimaSurrogate
 
 _log = get_logger(__name__)
 
@@ -372,8 +380,6 @@ def _least_squares(residuals, theta0: np.ndarray, args: tuple, upper: np.ndarray
     Uses Levenberg-Marquardt when nothing is bounded, else trust-region
     reflective, starting from ``theta0`` clipped into the bounds.
     """
-    from scipy.optimize import least_squares
-
     bounded = bool(np.isfinite(upper).any())
     return least_squares(
         residuals,
@@ -742,15 +748,6 @@ def fit_output_error_ipopt(
         FlexConfigError: If the output or an input carries no units, or
             ``training_index`` is not a regular ``DatetimeIndex``.
     """
-    import pyomo.environ as pyo
-    from dateutil.relativedelta import relativedelta
-    from pyomo.environ import units as pyunits
-
-    from flexcore.solvers import ProblemClass, get_solver
-    from flexops.core.time_block import TimeBlock
-    from flexops.core.units import parse_units
-    from flexops.surrogates.arima import ArimaSurrogate
-
     if not output_units:
         raise FlexConfigError(
             'ArimaRegressor fit_solver="ipopt" builds a real Pyomo '
