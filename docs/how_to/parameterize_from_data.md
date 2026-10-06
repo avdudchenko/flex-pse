@@ -269,14 +269,87 @@ problem.
 ```python
 from flexparameterize.regression.arima import ArimaRegressor
 
-regressor = ArimaRegressor(order=(1, 0, 0), max_ar_persistence=None).fit(X_train, y_train)
+regressor = ArimaRegressor(order=(1, 0, 0)).fit(X_train, y_train)
 spec = regressor.to_surrogate_spec()
 ```
 
 `order=(p, d, q)` may use `d=0` or `d=1`; seasonal differencing and seasonal
-AR/MA terms are not supported.  When `max_ar_persistence` is set, fits whose
-AR root is too close to the unit circle raise `FlexConfigError` — the surrogate
-would be numerically unstable inside an optimizer.
+AR/MA terms are not supported.  `max_ar_persistence` (default `0.85`) bounds
+every AR coefficient during the fit itself.  Leave it on: disabling it is the
+single biggest source of unusable coefficients.
+
+A per-coefficient bound does not guarantee a stable model: `ar=[0.85, 0.85]`
+passes it, but forecasts from it explode.  `fit()` therefore also checks that
+the fitted AR block is stationary, and raises `FlexConfigError` when it is not.
+Lower the AR order or tighten `max_ar_persistence`.
+
+### Choosing the fitting objective
+
+Keep the default, `fit_objective="equation_error"`, unless a held-out
+comparison on your own data shows that `output_error` forecasts better.
+
+| Configuration | What it minimizes |
+|---------------|-------------------|
+| `fit_objective="equation_error"` (default) | One-step-ahead residuals, using actual lagged values |
+| `fit_objective="output_error"` | Windowed free-run error: the error the surrogate makes when it simulates forward with innovations at zero |
+| `fit_objective="output_error", fit_solver="ipopt"` | The same free-run error, through the real `ArimaSurrogate` over the whole series |
+
+`output_error` exists because a `d=1` model *integrates* its drift term.  A
+drift error that costs almost nothing per step accumulates linearly over a
+forecast, so the one-step objective barely constrains drift.  On held-out
+biogas data the expected pattern appeared for `d=1` orders and nowhere else.
+The test trained on 384 rows (4 days) and forecast the next 192 steps (2 days),
+repeated from 11 starting points across the series, for 13 orders:
+
+| Held-out 192-step RMSE (mean) | `equation_error` | `output_error` | `output_error` + ipopt |
+|---|---|---|---|
+| `d=0` orders | 0.00573 | 0.00576 | 0.00576 |
+| `d=1` orders | 0.00951 | 0.00653 | 0.00766 |
+| Fits refused (see below), of 143 | 0 | 17 | 8 |
+
+The `d=1` gain comes from a few orders. `ARIMA(0,1,1)` and `ARIMA(2,1,2)`
+improved at 91% of starting points.  Other orders were a coin flip.
+
+```python
+regressor = ArimaRegressor(
+    order=(2, 1, 2),
+    fit_objective="output_error",
+    forecast_horizon=192,       # set this to the horizon you will forecast over
+).fit(X_train, y_train, input_units=..., output_units=...)
+```
+
+Before switching, know the following:
+
+- **`output_error` refuses fits it cannot make safe.**  The free-run objective
+  barely constrains the MA block, and left alone it pushes MA outside the unit
+  circle.  The forecast starts its MA lags from one-step residuals, which such a
+  block makes explode: first-step forecasts reached ~1e6 before this was
+  guarded.  So every MA coefficient is bounded to ±0.99.  That bound alone does
+  not guarantee invertibility for `q >= 2`, so a non-invertible fit raises
+  `FlexConfigError`.  `output_error` also tends to push AR toward
+  non-stationarity, which the stationarity check refuses.  On the biogas data
+  that happened at about half the starting points for `(0,0,3)`, `(2,0,0)` and
+  `(3,1,3)`.  The default objective never raised.
+- **Under the default, a non-invertible MA block only logs a warning.**  It is
+  common (8 of 11 starting points for `(1,0,1)` on biogas data) and harmless for
+  forecasting, because the forecast starts from the very residuals the fit
+  minimized.  It does make the one-step statistics (`aic`, `bic`, `sigma2`) and
+  an in-Pyomo regression with free innovations unreliable.
+- **`output_error` is a forecaster, not an estimator.**  It trades parameter
+  consistency for multi-step accuracy.  Read coefficients off an
+  `equation_error` fit.
+- **Set `forecast_horizon` to your real forecast horizon.**  `"auto"` spans the
+  data up to a 192-step cap, which is a fallback, not an optimum.
+- **Judge on held-out data.**  `metrics["free_run_rmse"]` is reported for both
+  objectives, but it is in-sample, and `output_error` minimizes it directly, so
+  it flatters that objective.  In-sample, `output_error` cut the `ARIMA(3,1,3)`
+  free-run error by 2.9×.  Held out, it was refused at 6 of 11 starting points
+  and beat the default at the other 5.
+
+`fit_solver="ipopt"` requires declared `input_units`/`output_units` and a
+regular `DatetimeIndex`, since it builds a real `TimeBlock` and surrogate.  It
+needs no `forecast_horizon`, because one model spans the series.  It refused
+fewer fits than the scipy backend but improved `d=1` forecasts less.
 
 ### Build the Pyomo surrogate
 
