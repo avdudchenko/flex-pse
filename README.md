@@ -1,18 +1,17 @@
-# flex-pse
+<p align="left">
+  <img src="docs/_static/logo/flex-pse-horizontal-light.png" alt="flex-pse" width="480">
+</p>
 
 [![CI](https://github.com/flex-pse/flex-pse/actions/workflows/ci.yml/badge.svg)](https://github.com/flex-pse/flex-pse/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/flex-pse/flex-pse/graph/badge.svg)](https://codecov.io/gh/flex-pse/flex-pse)
 
 An open-source Pyomo/IDAES platform for industrial energy-flexibility
-optimization — model an industrial facility (water/wastewater/desalination or
-similar) as a time-discretized optimization problem, parameterize it from
-plant data, and solve scheduling problems against real electricity tariffs and
-demand-response signals. Three tools share one config-driven substrate:
+optimization — model an industrial facility as a time-discretized optimization 
+problem, parameterize it from plant data, and solve scheduling problems against 
+real electricity tariffs and demand-response signals. These tools are configured:
 **FlexOps** (unit models, plant/network composition, EECO-backed tariff
 costing), **FlexParameterize** (fit a FlexOps model from tabular plant data),
-and **FlexSchedule** (rolling-horizon scheduling — reserved for a future
-release; see the [changelog](CHANGELOG.md) for what 0.1.0 does and does not
-cover).
+and **FlexSchedule**. See the [changelog](CHANGELOG.md) for structural decisions.
 
 ## Install
 
