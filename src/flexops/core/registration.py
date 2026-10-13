@@ -266,9 +266,14 @@ class RelationRecord:
         surrogate_blocks: Every surrogate block ever built for this relation,
             oldest first. The list is append-only; deactivated blocks remain
             here so ``switch_surrogate_block`` can reactivate them.
+        surrogate_instances: The :class:`~flexops.surrogates.base.Surrogate`
+            that built each entry of ``surrogate_blocks``, index-aligned with
+            it, so ``switch_surrogate_block`` can restore the matching
+            ``surrogate_instance``.
         surrogate_instance: The :class:`~flexops.surrogates.base.Surrogate`
-            instance currently active for this relation, or ``None`` when no
-            surrogate has been swapped. Used by
+            instance currently active for this relation, or ``None`` when
+            ``surrogate_block`` is ``None`` (no swap yet, or the active
+            surrogate built no block). Used by
             :meth:`~flexops.core.ops_block.OpsBlockData.get_surrogate_spec`
             to delegate spec extraction without depending on block attributes.
     """
@@ -282,6 +287,7 @@ class RelationRecord:
     swap_count: int = 0
     surrogate_block: Any = None
     surrogate_blocks: list = field(default_factory=list)
+    surrogate_instances: list = field(default_factory=list)
     surrogate_instance: Any = None
 
 

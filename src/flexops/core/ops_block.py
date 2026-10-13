@@ -949,19 +949,7 @@ class OpsBlockData(UnitModelBlockData):
             FlexConfigError: If ``relation_name`` was never registered, or a
                 declared input variable is not found on the unit.
         """
-        record = next(
-            (r for r in self._io_registry.relations if r.name == relation_name), None
-        )
-        if record is None:
-            known = (
-                ", ".join(repr(r.name) for r in self._io_registry.relations) or "none"
-            )
-            raise FlexConfigError(
-                f"{relation_name!r} is not a registered relation on "
-                f"{self.name!r} (registered: {known}).",
-                field="relation_name",
-                value=relation_name,
-            )
+        record = self._relation_record(relation_name)
         for name in surrogate.input_variables:
             self.resolve_variable(name, field="input_variables")
 
@@ -985,11 +973,13 @@ class OpsBlockData(UnitModelBlockData):
         if surrogate_block is not None:
             self.add_component(block_name, surrogate_block)
             record.surrogate_blocks.append(surrogate_block)
+            record.surrogate_instances.append(surrogate)
             record.surrogate_block = surrogate_block
             record.surrogate_instance = surrogate
             block_component = surrogate_block
         else:
             record.surrogate_block = None
+            record.surrogate_instance = None
             block_component = None
             legacy_aux_components = [
                 self.find_component(name) for name in set(self.component_map()) - before
@@ -1082,17 +1072,7 @@ class OpsBlockData(UnitModelBlockData):
                 registered relation.
         """
         if relation_name is not None:
-            record = next(
-                (r for r in self._io_registry.relations if r.name == relation_name),
-                None,
-            )
-            if record is None:
-                raise FlexConfigError(
-                    f"{relation_name!r} is not a registered relation on "
-                    f"{self.name!r}.",
-                    field="relation_name",
-                    value=relation_name,
-                )
+            record = self._relation_record(relation_name)
             return [b.local_name for b in record.surrogate_blocks]
         return [
             b.local_name
@@ -1123,17 +1103,7 @@ class OpsBlockData(UnitModelBlockData):
                 registered relation.
         """
         if relation_name is not None:
-            record = next(
-                (r for r in self._io_registry.relations if r.name == relation_name),
-                None,
-            )
-            if record is None:
-                raise FlexConfigError(
-                    f"{relation_name!r} is not a registered relation on "
-                    f"{self.name!r}.",
-                    field="relation_name",
-                    value=relation_name,
-                )
+            record = self._relation_record(relation_name)
             if record.surrogate_block is None:
                 return None
             return record.surrogate_block.local_name
@@ -1144,6 +1114,88 @@ class OpsBlockData(UnitModelBlockData):
         }
         return result if result else None
 
+    def _relation_record(self, relation_name: str):
+        """Return the registered relation record named ``relation_name``.
+
+        Raises:
+            FlexConfigError: If no relation with that name is registered.
+        """
+        record = next(
+            (r for r in self._io_registry.relations if r.name == relation_name), None
+        )
+        if record is None:
+            known = (
+                ", ".join(repr(r.name) for r in self._io_registry.relations) or "none"
+            )
+            raise FlexConfigError(
+                f"{relation_name!r} is not a registered relation on "
+                f"{self.name!r} (registered: {known}).",
+                field="relation_name",
+                value=relation_name,
+            )
+        return record
+
+    def _active_surrogate_records(self, relation_name: str | None) -> list:
+        """Return the relation records that currently carry a surrogate block.
+
+        Args:
+            relation_name: If provided, select only that relation, which must
+                have an active surrogate block. If ``None``, select every
+                relation with an active surrogate block, in registration order.
+
+        Returns:
+            A non-empty list of relation records.
+
+        Raises:
+            FlexConfigError: If ``relation_name`` is not registered or has no
+                active surrogate block, or if ``relation_name`` is ``None``
+                and no relation on this unit has an active surrogate block.
+        """
+        if relation_name is not None:
+            record = self._relation_record(relation_name)
+            if record.surrogate_block is None:
+                raise FlexConfigError(
+                    f"{relation_name!r} on {self.name!r} has no active "
+                    "surrogate block; call swap_relation first.",
+                    field="relation_name",
+                    value=relation_name,
+                )
+            return [record]
+        records = [
+            r for r in self._io_registry.relations if r.surrogate_block is not None
+        ]
+        if not records:
+            raise FlexConfigError(
+                f"{self.name!r} has no active surrogate blocks; call "
+                "swap_relation first.",
+                field="relation_name",
+                value=None,
+            )
+        return records
+
+    def _single_active_surrogate_record(self, relation_name: str | None):
+        """Return the one relation record a single-surrogate query targets.
+
+        Args:
+            relation_name: The relation to select. If ``None``, the unit must
+                carry exactly one active surrogate block.
+
+        Raises:
+            FlexConfigError: For the cases :meth:`_active_surrogate_records`
+                rejects, or if ``relation_name`` is ``None`` and more than one
+                relation has an active surrogate block.
+        """
+        records = self._active_surrogate_records(relation_name)
+        if len(records) > 1:
+            names = ", ".join(repr(r.name) for r in records)
+            raise FlexConfigError(
+                f"{self.name!r} has {len(records)} active surrogate blocks "
+                f"({names}); pass relation_name to choose one.",
+                field="relation_name",
+                value=None,
+            )
+        return records[0]
+
     def get_surrogate_spec(self, relation_name: str | None = None) -> dict:
         """Retrieve the solved surrogate spec from the active surrogate block.
 
@@ -1153,8 +1205,7 @@ class OpsBlockData(UnitModelBlockData):
 
         Args:
             relation_name: The relation whose active surrogate spec to
-                retrieve. If ``None``, use the first/only active surrogate
-                on this unit.
+                retrieve. If ``None``, use the unit's only active surrogate.
 
         Returns:
             A surrogate ``data`` dict, in whatever contract the surrogate's
@@ -1165,40 +1216,11 @@ class OpsBlockData(UnitModelBlockData):
 
         Raises:
             FlexConfigError: If the relation is not registered, has no
-                active surrogate block, or the surrogate does not implement
-                ``get_surrogate_spec``.
+                active surrogate block, ``relation_name`` is ``None`` while
+                several surrogates are active, or the surrogate does not
+                implement ``get_surrogate_spec``.
         """
-        if relation_name is not None:
-            record = next(
-                (r for r in self._io_registry.relations if r.name == relation_name),
-                None,
-            )
-            if record is None:
-                raise FlexConfigError(
-                    f"{relation_name!r} is not a registered relation on "
-                    f"{self.name!r}.",
-                    field="relation_name",
-                    value=relation_name,
-                )
-            if record.surrogate_block is None:
-                raise FlexConfigError(
-                    f"{relation_name!r} on {self.name!r} has no active "
-                    "surrogate block; call swap_relation first.",
-                    field="relation_name",
-                    value=relation_name,
-                )
-        else:
-            records = [
-                r for r in self._io_registry.relations if r.surrogate_block is not None
-            ]
-            if not records:
-                raise FlexConfigError(
-                    f"{self.name!r} has no active surrogate blocks; call "
-                    "swap_relation first.",
-                    field="relation_name",
-                    value=None,
-                )
-            record = records[0]
+        record = self._single_active_surrogate_record(relation_name)
 
         surrogate = record.surrogate_instance
         if surrogate is None or not hasattr(surrogate, "get_surrogate_spec"):
@@ -1225,7 +1247,7 @@ class OpsBlockData(UnitModelBlockData):
 
         Args:
             relation_name: The relation whose active surrogate objective to fetch.
-                If ``None``, use the first/only active surrogate on this unit.
+                If ``None``, use the unit's only active surrogate.
             **kwargs: Extra arguments forwarded to the surrogate block's objective
                 helper (for example, ``innovation_scale`` or ``time_index``).
 
@@ -1234,40 +1256,12 @@ class OpsBlockData(UnitModelBlockData):
             active surrogate block.
 
         Raises:
-            FlexConfigError: If there is no active surrogate block, or the active
-                surrogate block does not expose a regression/objective helper.
+            FlexConfigError: If there is no active surrogate block,
+                ``relation_name`` is ``None`` while several surrogates are
+                active, or the active surrogate block does not expose a
+                regression/objective helper.
         """
-        if relation_name is not None:
-            record = next(
-                (r for r in self._io_registry.relations if r.name == relation_name),
-                None,
-            )
-            if record is None:
-                raise FlexConfigError(
-                    f"{relation_name!r} is not a registered relation on "
-                    f"{self.name!r}.",
-                    field="relation_name",
-                    value=relation_name,
-                )
-            if record.surrogate_block is None:
-                raise FlexConfigError(
-                    f"{relation_name!r} on {self.name!r} has no active "
-                    "surrogate block; call swap_relation first.",
-                    field="relation_name",
-                    value=relation_name,
-                )
-        else:
-            records = [
-                r for r in self._io_registry.relations if r.surrogate_block is not None
-            ]
-            if not records:
-                raise FlexConfigError(
-                    f"{self.name!r} has no active surrogate blocks; call "
-                    "swap_relation first.",
-                    field="relation_name",
-                    value=None,
-                )
-            record = records[0]
+        record = self._single_active_surrogate_record(relation_name)
 
         block = record.surrogate_block
         objective = block.find_component("get_regression_objective")
@@ -1291,9 +1285,9 @@ class OpsBlockData(UnitModelBlockData):
 
         Looks up the block on this unit by name, finds the ``RelationRecord``
         it belongs to, deactivates whatever is currently active for that
-        relation, activates the named block, updates ``record.surrogate_block``
-        to point to it, and re-registers its coefficients as regressable
-        parameters.
+        relation, activates the named block, points ``record.surrogate_block``
+        and ``record.surrogate_instance`` at it and the surrogate that built
+        it, and re-registers its coefficients as regressable parameters.
 
         Args:
             block_name: The local name of the surrogate block to activate
@@ -1329,6 +1323,13 @@ class OpsBlockData(UnitModelBlockData):
         block.activate()
 
         record.surrogate_block = block
+        record.surrogate_instance = next(
+            instance
+            for candidate, instance in zip(
+                record.surrogate_blocks, record.surrogate_instances, strict=True
+            )
+            if candidate is block
+        )
         record.fitted = None
         for candidate in (
             "fitted",
@@ -1371,15 +1372,7 @@ class OpsBlockData(UnitModelBlockData):
         Returns:
             The local names of the registered coefficient parameters.
         """
-        record = next(
-            (r for r in self._io_registry.relations if r.name == relation_name), None
-        )
-        if record is None:
-            raise FlexConfigError(
-                f"{relation_name!r} is not a registered relation on " f"{self.name!r}.",
-                field="relation_name",
-                value=relation_name,
-            )
+        record = self._relation_record(relation_name)
         if record.surrogate_block is None:
             raise FlexConfigError(
                 f"{relation_name!r} on {self.name!r} has no surrogate block; "
@@ -1438,42 +1431,7 @@ class OpsBlockData(UnitModelBlockData):
             FlexConfigError: If ``relation_name`` is provided but is not
                 registered or has no active surrogate block.
         """
-        if relation_name is not None:
-            records = [
-                next(
-                    (r for r in self._io_registry.relations if r.name == relation_name),
-                    None,
-                )
-            ]
-            if records[0] is None:
-                raise FlexConfigError(
-                    f"{relation_name!r} is not a registered relation on "
-                    f"{self.name!r}.",
-                    field="relation_name",
-                    value=relation_name,
-                )
-        else:
-            records = [
-                r for r in self._io_registry.relations if r.surrogate_block is not None
-            ]
-            if not records:
-                raise FlexConfigError(
-                    f"{self.name!r} has no active surrogate blocks; call "
-                    "swap_relation first.",
-                    field="relation_name",
-                    value=None,
-                )
-
-        for record in records:
-            if record.surrogate_block is None:
-                if relation_name is not None:
-                    raise FlexConfigError(
-                        f"{record.name!r} on {self.name!r} has no active "
-                        "surrogate block; call swap_relation first.",
-                        field="relation_name",
-                        value=record.name,
-                    )
-                continue
+        for record in self._active_surrogate_records(relation_name):
             coefficients = getattr(record.surrogate_block, "coefficients", None)
             if coefficients is not None:
                 coefficients.unfix()
@@ -1494,42 +1452,7 @@ class OpsBlockData(UnitModelBlockData):
             FlexConfigError: If ``relation_name`` is provided but is not
                 registered or has no active surrogate block.
         """
-        if relation_name is not None:
-            records = [
-                next(
-                    (r for r in self._io_registry.relations if r.name == relation_name),
-                    None,
-                )
-            ]
-            if records[0] is None:
-                raise FlexConfigError(
-                    f"{relation_name!r} is not a registered relation on "
-                    f"{self.name!r}.",
-                    field="relation_name",
-                    value=relation_name,
-                )
-        else:
-            records = [
-                r for r in self._io_registry.relations if r.surrogate_block is not None
-            ]
-            if not records:
-                raise FlexConfigError(
-                    f"{self.name!r} has no active surrogate blocks; call "
-                    "swap_relation first.",
-                    field="relation_name",
-                    value=None,
-                )
-
-        for record in records:
-            if record.surrogate_block is None:
-                if relation_name is not None:
-                    raise FlexConfigError(
-                        f"{record.name!r} on {self.name!r} has no active "
-                        "surrogate block; call swap_relation first.",
-                        field="relation_name",
-                        value=record.name,
-                    )
-                continue
+        for record in self._active_surrogate_records(relation_name):
             coefficients = getattr(record.surrogate_block, "coefficients", None)
             if coefficients is not None:
                 coefficients.fix()

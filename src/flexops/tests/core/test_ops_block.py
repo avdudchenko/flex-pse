@@ -1166,6 +1166,19 @@ class _LaggedSurrogate(Surrogate):
 
 
 @pytest.mark.unit
+def test_blockless_swap_clears_previous_surrogate_instance():
+    """A surrogate that builds no block leaves no stale instance behind."""
+    _, unit = _unit_with_relation()
+    unit.swap_relation("power_electrical_relation", _DispatchSurrogate(spec=True))
+
+    unit.swap_relation("power_electrical_relation", _LaggedSurrogate({}))
+
+    record = unit._relation_record("power_electrical_relation")
+    assert record.surrogate_block is None
+    assert record.surrogate_instance is None
+
+
+@pytest.mark.unit
 def test_swap_relation_skips_indices_a_body_declines():
     """A body returning Constraint.Skip omits that index from the fitted relation.
 
@@ -1680,7 +1693,7 @@ class _DispatchSurrogate(Surrogate):
 
 @pytest.mark.unit
 def test_get_surrogate_spec_dispatches_named_and_default_relation():
-    """get_surrogate_spec delegates for an explicit or first active relation."""
+    """get_surrogate_spec delegates for an explicit or the only active relation."""
     _, unit = _flow_relation_unit()
     unit.swap_relation("flow_relation", _DispatchSurrogate(spec=True))
 
@@ -1742,6 +1755,30 @@ def test_get_surrogate_objective_rejects_invalid_or_unsupported_relations():
     unit.swap_relation("flow_relation", _NoCoefficientsSurrogate({}))
     with pytest.raises(FlexConfigError, match="does not expose a usable objective"):
         unit.get_surrogate_objective()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("method", ["get_surrogate_spec", "get_surrogate_objective"])
+def test_single_surrogate_queries_require_relation_name_when_ambiguous(method):
+    """With several active surrogates, a default query names them and refuses."""
+    _, unit = _two_flow_relation_unit()
+    unit.swap_relation(
+        "flow_relation", _DispatchSurrogate(spec=True, objective="regression")
+    )
+    unit.swap_relation(
+        "secondary_flow_relation",
+        _DispatchSurrogate(spec=True, objective="regression"),
+    )
+
+    with pytest.raises(
+        FlexConfigError,
+        match=r"2 active surrogate blocks \('flow_relation', "
+        r"'secondary_flow_relation'\); pass relation_name",
+    ):
+        getattr(unit, method)()
+
+    # An explicit name still resolves unambiguously.
+    getattr(unit, method)("secondary_flow_relation")
 
 
 @pytest.mark.unit

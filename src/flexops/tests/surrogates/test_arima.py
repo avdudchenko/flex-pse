@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import warnings
 
 import numpy as np
@@ -545,6 +546,30 @@ def test_swap_relation_twice_uses_independent_latest_block():
     assert pyo.value(second.body(0)) == pytest.approx(2.0)
 
 
+@pytest.mark.unit
+def test_switch_back_returns_spec_from_reactivated_surrogate():
+    """Switching to an older block must also restore its Surrogate instance.
+
+    Otherwise get_surrogate_spec pairs the newest surrogate's
+    input_variables with the older block's coefficients.
+    """
+    _m, unit = _make_unit()
+    _add_swappable_relation(unit)
+    first_data = _arima_data(p=1, n_exog=1)
+    first_data["coefficients"].update({"ar_coefs": [0.3], "exog_coefs": [0.7]})
+    first = unit.swap_relation("biogas_m3_hour_relation", ArimaSurrogate(first_data))
+    unit.swap_relation(
+        "biogas_m3_hour_relation", ArimaSurrogate(_arima_data(p=1, n_exog=2))
+    )
+
+    unit.switch_surrogate_block(first.local_name)
+    spec = unit.get_surrogate_spec("biogas_m3_hour_relation")
+
+    assert spec["input_variables"] == first_data["input_variables"]
+    assert spec["coefficients"]["exog_coefs"] == pytest.approx([0.7])
+    assert spec["coefficients"]["ar_coefs"] == pytest.approx([0.3])
+
+
 # -- regression objective ----------------------------------------------------
 
 
@@ -726,6 +751,25 @@ def test_get_surrogate_spec_omits_zero_order_coefficient_keys():
     assert state["history"]["eps_values"] == pytest.approx([0.0, 0.0])
 
 
+def _build_capturing_warnings(surrogate, unit):
+    """Build ``surrogate`` and return ``(block, body, warning_messages)``.
+
+    ``flexcore.logger`` loggers do not propagate, so ``caplog`` cannot see
+    them; a handler is attached to the module logger directly instead.
+    """
+    records: list[logging.LogRecord] = []
+    capture = logging.Handler()
+    capture.emit = records.append
+    logger = logging.getLogger("flexops.surrogates.arima")
+    logger.addHandler(capture)
+    try:
+        block, body = surrogate.build(unit, unit.biogas_m3_hour)
+    finally:
+        logger.removeHandler(capture)
+    messages = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+    return block, body, messages
+
+
 @pytest.mark.unit
 def test_build_forecasts_missing_history_before_future_start():
     _m, unit = _make_unit(n_points=2, start_date="2025-01-01T01:00:00")
@@ -738,9 +782,128 @@ def test_build_forecasts_missing_history_before_future_start():
         "eps_values": [0.0, 0.0, 0.0],
     }
 
-    block, _body = ArimaSurrogate(data).build(unit, unit.biogas_m3_hour)
+    block, _body, messages = _build_capturing_warnings(ArimaSurrogate(data), unit)
 
     assert pyo.value(block.initial_y_history[0]) == pytest.approx(6.75)
+    assert len(messages) == 1
+    assert "2 step(s) before the TimeBlock start" in messages[0]
+
+
+@pytest.mark.unit
+def test_build_does_not_warn_when_history_ends_at_future_start():
+    _m, unit = _make_unit(n_points=2, start_date="2025-01-01T00:30:00")
+    data = _arima_data(p=1, q=0, n_exog=0)
+    data["history"] = {
+        "start_date": "2025-01-01T00:00:00",
+        "time_step_seconds": 900.0,
+        "y_values": [10.0, 20.0, 21.0],
+        "eps_values": [0.0, 0.0, 0.0],
+    }
+
+    block, _body, messages = _build_capturing_warnings(ArimaSurrogate(data), unit)
+
+    assert pyo.value(block.initial_y_history[0]) == pytest.approx(21.0)
+    assert messages == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    (
+        "order",
+        "coefficients",
+        "history",
+        "start_date",
+        "expected_y",
+        "expected_eps",
+        "expected_body",
+        "missing_steps",
+    ),
+    [
+        pytest.param(
+            # ARIMA(2,1,1): the first forecast step uses the stored eps 0.3;
+            # the second uses the zero forecast innovation.
+            #   step 1: 0.1 + 0.5*(5-4) + 0.2*(4-2) + 0.4*0.3 = 1.12 -> 6.12
+            #   step 2: 0.1 + 0.5*(6.12-5) + 0.2*(5-4) + 0.4*0 = 0.86 -> 6.98
+            [2, 1, 1],
+            {"drift": 0.1, "ar_coefs": [0.5, 0.2], "ma_coefs": [0.4]},
+            {"y_values": [1.0, 2.0, 4.0, 5.0], "eps_values": [0.0, 0.0, 0.5, 0.3]},
+            "2025-01-01T00:45:00",
+            [5.0, 6.12, 6.98],
+            [0.0],
+            6.98 + 0.1 + 0.5 * (6.98 - 6.12) + 0.2 * (6.12 - 5.0),
+            2,
+            id="arima_2_1_1_gap",
+        ),
+        pytest.param(
+            # Pure MA(2): 1.0 + 0.5*0.8 + 0.25*0.4 = 1.5.
+            [0, 0, 2],
+            {"intercept": 1.0, "ma_coefs": [0.5, 0.25]},
+            {"y_values": [0.0, 0.0, 3.0], "eps_values": [0.2, 0.4, 0.8]},
+            "2025-01-01T00:30:00",
+            [],
+            [0.8, 0.0],
+            1.0 + 0.5 * 0.0 + 0.25 * 0.8,
+            1,
+            id="ma_2_gap",
+        ),
+        pytest.param(
+            # Next horizon starts right after the last stored point.
+            [2, 1, 1],
+            {"drift": 0.1, "ar_coefs": [0.5, 0.2], "ma_coefs": [0.4]},
+            {"y_values": [1.0, 2.0, 4.0, 5.0], "eps_values": [0.0, 0.0, 0.5, 0.3]},
+            "2025-01-01T00:15:00",
+            [2.0, 4.0, 5.0],
+            [0.3],
+            5.0 + 0.1 + 0.5 * (5.0 - 4.0) + 0.2 * (4.0 - 2.0) + 0.4 * 0.3,
+            0,
+            id="arima_2_1_1_contiguous",
+        ),
+    ],
+)
+def test_build_initial_state_after_history(
+    order,
+    coefficients,
+    history,
+    start_date,
+    expected_y,
+    expected_eps,
+    expected_body,
+    missing_steps,
+):
+    _m, unit = _make_unit(n_points=2, start_date=start_date)
+    p, d, q = order
+    data = _arima_data(p=p, d=d, q=q, n_exog=0)
+    data["coefficients"].update(coefficients)
+    data["history"] = {
+        "start_date": "2025-01-01T00:00:00",
+        "time_step_seconds": 900.0,
+        **history,
+    }
+
+    block, body, messages = _build_capturing_warnings(ArimaSurrogate(data), unit)
+
+    assert [pyo.value(v) for v in block.initial_y_history.values()] == (
+        pytest.approx(expected_y)
+    )
+    assert [pyo.value(v) for v in block.initial_eps_history.values()] == (
+        pytest.approx(expected_eps)
+    )
+    assert pyo.value(body(0)) == pytest.approx(expected_body)
+    if missing_steps:
+        assert len(messages) == 1
+        assert f"{missing_steps} step(s) before" in messages[0]
+    else:
+        assert messages == []
+
+
+@pytest.mark.unit
+def test_validate_rejects_history_series_with_different_lengths():
+    data = _arima_data(p=1, q=1)
+    data["history"]["y_values"] = [0.0, 1.0, 2.0]
+    data["history"]["eps_values"] = [0.0, 0.5]
+
+    with pytest.raises(FlexConfigError, match="same number of modeled points"):
+        ArimaSurrogate(data)
 
 
 @pytest.mark.unit
