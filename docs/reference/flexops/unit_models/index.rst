@@ -227,6 +227,8 @@ leaves the optimizer free to shape the profile that reaches it. The metered
 ``withdrawal[t]`` itself stays indexed by time either way, so costing, plant
 aggregation and ``set_external_dispatch`` are unaffected. A limit whose units
 contradict the declared basis raises ``FlexConfigError`` naming the config key.
+On the period basis a limit may also be a length-T series (or a time-indexed
+Pyomo component), which sets each period's Param value directly.
 
 .. autosummary::
    :toctree: generated
@@ -251,6 +253,40 @@ disposal) and negative is revenue (potable water sold).
    :nosignatures:
 
    Product
+
+.. currentmodule:: flexops.unit_models.grid_connection
+
+The plant's point of interconnection with the electric grid. Built directly on a
+``PlantBlock`` (anywhere else raises ``FlexConfigError``), it splits the plant's
+net electrical draw into two non-negative flows,
+
+.. math::
+
+    P_{import}[t] - P_{export}[t] = P_{plant}[t],
+
+where :math:`P_{plant}[t]` is the plant's ``total_electrical_power[t]``, the
+sum of its units' ``power_electrical``. Generation is negative, so a surplus
+appears as export. The unit registers no power draw of its own, because it would
+then count itself in the total it balances. A unit added after the
+``GridConnection`` is still included: the constraint references the plant total
+by name, and ``cost_process()`` refreshes that total in place.
+
+``min_import``/``max_import``/``min_export``/``max_export`` are optional
+per-period limits, built with the same ``<name>_min``/``<name>_max`` mutable
+Params and ``_limit`` Constraints as ``Feed`` and ``Product``. ``None`` means
+unlimited. Each limit is a power scalar, a length-T series, or a time-indexed Pyomo
+component, so an interconnection limit that varies by hour is given directly.
+Billing is unchanged: costing still prices the plant's net draw. Nothing
+prevents importing and exporting in the same period. That is harmless while the
+two flows share a price, and an exclusivity binary belongs here once export is
+priced separately.
+
+.. autosummary::
+   :toctree: generated
+   :template: unit_model.rst
+   :nosignatures:
+
+   GridConnection
 
 Generic surrogate
 -----------------

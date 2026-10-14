@@ -272,6 +272,17 @@ def test_feed_limit_params_are_converted_to_the_flow_basis():
         assert pyo.value(unit.withdrawal_max[t]) == pytest.approx(1.0)
 
 
+@pytest.mark.unit
+def test_feed_period_limit_accepts_one_value_per_period():
+    """A length-T series sets each period's limit, converted onto the flow basis."""
+    rate = pyunits.m**3 / pyunits.hr
+    _, unit = _feed(
+        3, max_withdrawal=[1 * rate, 2 * rate, 3000 * pyunits.L / pyunits.hr]
+    )
+    values = [pyo.value(unit.withdrawal_max[t]) for t in range(3)]
+    assert values == pytest.approx([1.0, 2.0, 3.0])
+
+
 # -- horizon-basis withdrawal limits ----------------------------------------
 
 

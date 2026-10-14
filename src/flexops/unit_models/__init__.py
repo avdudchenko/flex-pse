@@ -9,6 +9,7 @@ from flexops.unit_models.base import DIDOBlock, SIDOBlock, SISOBlock
 from flexops.unit_models.constant_intensity import ConstantEnergyIntensityModel
 from flexops.unit_models.exchanger import Exchanger
 from flexops.unit_models.feed import Feed
+from flexops.unit_models.grid_connection import GridConnection
 from flexops.unit_models.mixer import Mixer
 from flexops.unit_models.powergeneration.combustor import Combustor
 from flexops.unit_models.powergeneration.generic_renewables import GenericRenewables
@@ -29,6 +30,7 @@ __all__ = [
     "Exchanger",
     "Feed",
     "GenericRenewables",
+    "GridConnection",
     "Mixer",
     "Product",
     "Pump",

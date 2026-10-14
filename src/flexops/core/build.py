@@ -131,16 +131,23 @@ def _build_costing(model, cfg: ModelConfig):
         The constructible ``FlexCosting`` block.
     """
     costing = cfg.costing
-    prices = {
+    import_prices = {
         name: parse_quantity({"value": spec.value, "units": spec.units})
         for name, spec in (costing.energy_prices or {}).items()
+    }
+    export_prices = {
+        name: parse_quantity({"value": spec.value, "units": spec.units})
+        for name, spec in (costing.export_prices or {}).items()
     }
     return FlexCosting(
         time_block=model.time_block,
         tariff_file=costing.tariff_source,
-        energy_prices=prices or None,
+        energy_prices=import_prices or None,
+        export_prices=export_prices or None,
+        decomposition_type=costing.decomposition_type,
         currency=costing.currency,
         dr_event_file=None if costing.dr is None else costing.dr.events_source,
+        consumption_estimate=costing.consumption_estimate,
         fixed_operating_cost=costing.fixed_operating_cost,
         prorate_monthly_charges=costing.prorate_monthly_charges,
         lifetime_years=costing.lifetime_years,

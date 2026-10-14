@@ -20,7 +20,7 @@ line-break art — rendering is the documentation builder's job.
 import enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, model_validator
 
 CURRENT_SCHEMA_VERSION = "0.0.3"
 """str: the semantic schema version this build writes and validates against."""
@@ -278,6 +278,19 @@ class CostingConfig(_StrictModel):
         "carrier priced needs no tariff at all. Each price is flat over the horizon "
         "or given per time point.",
     )
+    export_prices: dict[str, PriceSpec] | None = Field(
+        default=None,
+        description="Optional prices paid for exports, keyed like energy_prices "
+        "('electrical' or a fuel name). Each key needs a matching energy_prices "
+        "entry and must not exceed it at any time point. A carrier left out "
+        "credits exports at its import price.",
+    )
+    decomposition_type: str | None = Field(
+        default=None,
+        description="Optional EECO decomposition of net electrical power and fuel "
+        "usage into imports and exports on the tariff path (e.g. 'linear'), so the "
+        "tariff's export charges apply. Passed straight to EECO.",
+    )
     currency: str = Field(
         default="USD",
         description="Currency basis to use when no tariff is given; a tariff's own "
@@ -286,6 +299,14 @@ class CostingConfig(_StrictModel):
     dr: DRConfig | None = Field(
         default=None,
         description="Optional demand-response container (containers-only in v0).",
+    )
+    consumption_estimate: dict[Literal["electric", "gas"], NonNegativeFloat] | None = (
+        Field(
+            default=None,
+            description="Estimated total consumption over the horizon, keyed by EECO "
+            "utility ('electric'/'gas'; kWh / m^3). EECO needs it to price any tier "
+            "other than a flat top tier.",
+        )
     )
     fixed_operating_cost: float = Field(
         default=0.0,

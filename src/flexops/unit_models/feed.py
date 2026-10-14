@@ -95,6 +95,7 @@ class FeedData(OpsBlockData):
         ``withdrawal_basis`` (default ``LimitBasis.PERIOD``) as either a
         rate that must hold every period, or a total amount over the whole
         horizon.
+        On the period basis a limit may also be a length-T series.
 
         ``price`` (default ``None``): a flat price per unit withdrawn,
         billed through ``costing_package`` (inherited) — which must be set
@@ -137,7 +138,8 @@ class FeedData(OpsBlockData):
         "max_withdrawal",
         ConfigValue(
             default=None,
-            description="Units-carrying scalar upper limit on the withdrawal "
+            description="Units-carrying upper limit on the withdrawal, a scalar or "
+            "(on the period basis) a length-T series "
             "(e.g. a permitted abstraction rate, or a monthly permit volume). "
             "Its dimension follows withdrawal_basis: a rate per period, or a "
             "quantity over the horizon. Builds a mutable Param and its "
@@ -148,7 +150,8 @@ class FeedData(OpsBlockData):
         "min_withdrawal",
         ConfigValue(
             default=None,
-            description="Units-carrying scalar lower limit on the withdrawal "
+            description="Units-carrying lower limit on the withdrawal, a scalar or "
+            "(on the period basis) a length-T series "
             "(e.g. a take-or-pay minimum). Its dimension follows "
             "withdrawal_basis: a rate per period, or a quantity over the "
             "horizon. Builds a mutable Param and its Constraint.",

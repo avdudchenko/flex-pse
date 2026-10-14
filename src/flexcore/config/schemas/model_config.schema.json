@@ -26,11 +26,47 @@
       "additionalProperties": false,
       "description": "Tariff, price, demand-response, and solve/objective options for a run.",
       "properties": {
+        "consumption_estimate": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "propertyNames": {
+                "enum": [
+                  "electric",
+                  "gas"
+                ]
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Estimated total consumption over the horizon, keyed by EECO utility ('electric'/'gas'; kWh / m^3). EECO needs it to price any tier other than a flat top tier.",
+          "title": "Consumption Estimate"
+        },
         "currency": {
           "default": "USD",
           "description": "Currency basis to use when no tariff is given; a tariff's own currency basis always wins.",
           "title": "Currency",
           "type": "string"
+        },
+        "decomposition_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional EECO decomposition of net electrical power and fuel usage into imports and exports on the tariff path (e.g. 'linear'), so the tariff's export charges apply. Passed straight to EECO.",
+          "title": "Decomposition Type"
         },
         "discount_rate": {
           "default": 0.08,
@@ -65,6 +101,22 @@
           "default": null,
           "description": "Optional native prices keyed by carrier or fuel name ('electrical', or a fuel such as 'natural_gas'). A carrier priced here is billed at that price instead of through the tariff, so a run with every carrier priced needs no tariff at all. Each price is flat over the horizon or given per time point.",
           "title": "Energy Prices"
+        },
+        "export_prices": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/PriceSpec"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional prices paid for exports, keyed like energy_prices ('electrical' or a fuel name). Each key needs a matching energy_prices entry and must not exceed it at any time point. A carrier left out credits exports at its import price.",
+          "title": "Export Prices"
         },
         "fixed_operating_cost": {
           "default": 0.0,

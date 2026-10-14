@@ -17,7 +17,7 @@ when EECO's API moves.
 EECO owns all cost math. These wrappers are glue. They marshal inputs, rename
 EECO's outputs to stable flex-pse names, and translate EECO/pandas errors into
 the flex-pse exception hierarchy. A flex-pse tariff object is simply an EECO
-``rate_data`` ``DataFrame`` (EECO 0.4.0 has no tariff loader of its own, so its
+``rate_data`` ``DataFrame`` (EECO 0.4.2 has no tariff loader of its own, so its
 cost functions consume that frame directly).
 
 .. note:: **EECO is only needed for tariffs.** The ``eeco`` import is soft, so
@@ -91,7 +91,7 @@ Tariff signal helpers
 
 Plain pandas signals over a tariff, for writing logic or heuristic
 constraints. Each is a flex-pse helper built on EECO's ``get_charge_dict``
-charge arrays (the source of the price data). EECO 0.4.0 exposes no per-stamp
+charge arrays (the source of the price data). EECO 0.4.2 exposes no per-stamp
 price accessor.
 
 .. autosummary::
@@ -129,7 +129,7 @@ conversion as a plain float factor and constrains its own dimensionless Vars
 to the series it is given. The builders for a single utility,
 :func:`add_electricity_cost` and :func:`add_fuel_cost`, remain available for
 building one leg alone. :func:`add_fuel_cost` takes a ``fuel_type`` (default
-``"gas"``, the only value EECO 0.4.0 supports). A hydrogen utility is
+``"gas"``, the only value EECO 0.4.2 supports). A hydrogen utility is
 expected upstream and will add a second value.
 
 Post-optimization evaluators
@@ -157,7 +157,7 @@ Demand response (containers-only in v0)
    :class:`DRConfig` holds a loaded DR program so the wiring exists, and the
    internal DR hook is a no-op. Supplying a DR file never changes the
    objective. Building DR event, curtailment, incentive, and capacity
-   constraints comes after v0. EECO 0.4.0 exposes no DR API, so the DR file
+   constraints comes after v0. EECO 0.4.2 exposes no DR API, so the DR file
    format is a flex-pse placeholder loaded into the container only.
 
 In-objective vs. reported cost
@@ -170,11 +170,29 @@ on a **fixed, realized** aggregate power numpy array to compute the TRUE
 (no longer relaxed) cost, the bill the user actually sees (see
 :doc:`../../explanation/reported_cost`).
 
-The relaxation drops the tiered energy surcharge when no consumption estimate
-is supplied, so the in-objective total is a proxy that is **≤ or ≈** the true
-bill computed after the fact. The raw solver objective is never reported as
-the cost the user sees. See :doc:`../../explanation/reported_cost` for why
-that distinction matters to a user.
+The raw solver objective is never reported as the user-facing cost.
+
+.. note:: **Tiered charges and the consumption estimate**
+
+   EECO prices a top tier (no higher tier above it) at one constant rate
+   exactly. Any other tiered energy or demand charge is dropped from the
+   objective unless EECO is given a consumption estimate (flex-pse logs a
+   warning when one is missing), so
+   the in-objective total then understates the true bill. That includes a base
+   tier, since EECO links the tiers of one charge by their shared ``name``.
+
+   Pass ``consumption_estimate`` (a mapping of EECO utility, ``"electric"`` or
+   ``"gas"``, to an estimated total consumption over the horizon in kWh / m^3)
+   to :func:`add_operating_cost`, or set ``CostingConfig.consumption_estimate``,
+   to price such a tier. The result is approximate and can land on either side
+   of the true bill;
+   :meth:`~flexops.costing.flex_costing.FlexCostingData.relaxation_gap` reports
+   by how much, given the solver results of an optimal solve.
+
+   Tier limits are monthly while the estimate covers the horizon, so on a
+   sub-month horizon a tier only triggers if the horizon alone exceeds its
+   limit. For a tiered demand charge, EECO converts the estimate into an
+   average kW, which can miss a real peak.
 
 .. admonition:: Timezones / DST
 
@@ -295,10 +313,21 @@ Every cost lives in one of two sub-blocks built by
            },
        )
 
-   Keys are ``"electrical"`` or a registered fuel name. A native price **wins
-   over a tariff** that also covers that carrier, so the two can be mixed
-   freely, say electricity priced by a tariff alongside a fuel priced
-   natively.
+   Keys are ``"electrical"`` or a registered fuel name. Native prices and an
+   EECO tariff mix freely across carriers, say electricity priced by a tariff
+   alongside a fuel priced natively. Each carrier is billed one way only:
+
+   * A carrier with an ``energy_prices`` entry is billed natively and never
+     sent to EECO, even when the tariff also covers its utility (``electric``
+     for ``"electrical"``, ``gas`` for any fuel). The native price **replaces**
+     that carrier's whole tariff bill, so the utility's demand, fixed and
+     ``export`` charges do not apply to it either.
+   * A carrier without an entry is billed by EECO against the tariff, and its
+     utility must have tariff rows, or the build raises
+     :class:`~flexcore.exceptions.FlexConfigError`.
+
+   Every fuel bills against the tariff's single ``gas`` utility, so a native
+   price for one fuel leaves the gas rows in place for the others.
 
    **A price may vary over the horizon.** Each entry is one of three things.
    It can be a single value (flat over the horizon), an array-like with one
@@ -400,6 +429,47 @@ Every cost lives in one of two sub-blocks built by
    sizing Vars across them is a planned wrapper for design mode, not built
    yet.
 
+.. note:: **Export prices.**
+
+   By default exports are credited at the import price, because an export is a
+   negative net series (net metering). To sell for less than you buy, give
+   ``export_prices``, keyed like ``energy_prices``, for any natively priced
+   carrier: electricity or a fuel the site sells::
+
+       m.costing = fo.FlexCosting(
+           time_block=m.time_block,
+           energy_prices={"electrical": pool_price, "biogas": 0.50},
+           export_prices={"electrical": 0.5 * pool_price, "biogas": 0.20},
+       )
+
+   Each export price takes the same forms and units as its ``energy_prices``
+   entry. The carrier's net series is then split into non-negative
+   ``opex.import_<carrier>`` and ``opex.export_<carrier>``, with
+   ``net[t] == import[t] - export[t]``, and the carrier costs
+   ``Σ_t (import_price[t] × import[t] − export_price[t] × export[t]) × dt``.
+   Because an export price may not exceed its import price, the optimizer never
+   imports and exports in the same period, so the model stays an LP with no
+   binaries. An export price above the import price at any time point raises
+   :class:`~flexcore.exceptions.FlexConfigError` (the check skips a price
+   component that has no value yet), as does an ``export_prices`` key with no
+   ``energy_prices`` entry. The split Vars can carry import and export limits
+   directly.
+
+.. note:: **Exports on the tariff path.**
+
+   An EECO tariff can carry ``export`` charges, but EECO only applies them once
+   net power is split into imports and exports. Pass
+   ``decomposition_type="linear"`` (or any type EECO supports) to
+   ``FlexCosting`` and it is handed to EECO for the electric and gas legs, in
+   both the in-objective cost and the post-solve bill (``report_cost``). The
+   default ``None`` skips the split. A tariff with an electric or gas
+   ``export`` charge requires it: with ``None`` EECO bills the net series as
+   both imports and exports, so ``FlexCosting`` raises
+   :class:`~flexcore.exceptions.FlexConfigError` instead of misbilling.
+   EECO owns the available types and whether a type keeps the problem linear:
+   ``"linear"`` stays an LP and is exact when no export charge exceeds its
+   energy charge, while ``"absolute_value"`` is nonlinear.
+
 .. note:: **Reporting rule.**
 
    :meth:`~FlexCostingData.report_cost` returns a categorized
@@ -410,7 +480,12 @@ Every cost lives in one of two sub-blocks built by
    ``aggregate_fuel_usage``, ``0`` when the model burns none), and fixed is
    the config constant. In v0 ``dr_revenue`` and the whole ``capital``
    breakdown are zero placeholders, so the structure is stable as those
-   features land. See :doc:`../../explanation/reported_cost` for why this
+   features land. Pass ``split_imports_exports=True`` to ``report_cost`` to
+   also get ``operating.imports`` (import cost) and ``operating.exports``
+   (export revenue, a positive magnitude), each keyed by carrier like
+   ``energy_prices``, alongside the net ``electricity`` and ``fuel``. Only
+   natively priced carriers appear; a tariff bill is EECO's single net figure.
+   See :doc:`../../explanation/reported_cost` for why this
    number, and not the solver's internal objective, is the one a user should
    trust.
 

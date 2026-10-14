@@ -27,6 +27,7 @@ a dual, so after solving you can read the shadow price of a resource limit.
 """
 
 import enum
+from collections.abc import Sized
 
 import pyomo.environ as pyo
 from pyomo.core.base.units_container import UnitsError
@@ -106,6 +107,46 @@ def _convert_limit(bound, units, field: str) -> float:
         ) from exc
 
 
+def _period_limit_values(bound, units, field: str, time_index):
+    """Convert a scalar or length-T series limit into Param initial values.
+
+    Args:
+        bound: A units-carrying scalar, a sequence of units-carrying values, or
+            a time-indexed Pyomo component with units.
+        units: The units the limited quantity uses.
+        field: The config key ``bound`` came from, named in error messages.
+        time_index: The TimeBlock's time set.
+
+    Returns:
+        A float for a scalar limit, or ``{t: float}`` for a series.
+
+    Raises:
+        FlexConfigError: If a series does not have one value per period, or a
+            value does not convert to ``units``.
+    """
+    is_indexed = getattr(bound, "is_indexed", None)
+    if callable(is_indexed):
+        if not is_indexed():
+            return _convert_limit(bound, units, field)
+        values = [bound[i] for i in bound.index_set()]
+    elif isinstance(bound, Sized) and not isinstance(bound, (str, bytes)):
+        values = list(bound)
+    else:
+        return _convert_limit(bound, units, field)
+    if len(values) != len(time_index):
+        raise FlexConfigError(
+            f"{field} has {len(values)} values, but the horizon has "
+            f"{len(time_index)} time points. A per-period limit is either a "
+            "single value or one value per time point.",
+            field=field,
+            value=bound,
+        )
+    return {
+        t: _convert_limit(value, units, field)
+        for t, value in zip(time_index, values, strict=True)
+    }
+
+
 def add_time_limits(
     block,
     quantity,
@@ -119,13 +160,13 @@ def add_time_limits(
 
     For each of ``lower``/``upper`` that's given, this builds ``{name}_min``
     / ``{name}_max`` (a mutable ``Param``, one value per time period,
-    starting at the given scalar and using ``quantity``'s units) and
+    starting at the given limit and using ``quantity``'s units) and
     ``{name}_min_limit`` / ``{name}_max_limit`` (the ``Constraint`` that
     enforces it).
 
-    If you need the limit to change over time, write directly to the Params
-    after they're built — for example ``feed.withdrawal_max[t].set_value(v)``
-    in a loop. If you instead want to force an *exact* value rather than a
+    A limit given as a series sets each period's value; the Params can also
+    be rewritten after they're built, e.g. ``feed.withdrawal_max[t].set_value(v)``.
+    If you instead want to force an *exact* value rather than a
     limit, this isn't the right tool: use
     :meth:`~flexops.core.ops_block.OpsBlockData.set_external_dispatch` to fix
     the quantity. For a limit on the total over the whole horizon instead of
@@ -135,17 +176,19 @@ def add_time_limits(
         block: The unit block to build the Params and Constraints on.
         quantity: The time-indexed ``Var``/``Reference`` to limit.
         name: The prefix used for the components this builds.
-        lower: A scalar lower limit with units, or ``None`` for no lower
-            limit. Converted to ``quantity``'s units.
-        upper: A scalar upper limit with units, or ``None`` for no upper
-            limit. Converted to ``quantity``'s units.
+        lower: A lower limit with units — a scalar, a length-T sequence, or a
+            time-indexed Pyomo component — or ``None`` for no lower limit.
+            Converted to ``quantity``'s units.
+        upper: An upper limit in the same forms as ``lower``, or ``None`` for
+            no upper limit.
         fields: The ``(lower, upper)`` config keys these limits came from,
-            named in the error if one doesn't convert.
+            named in the error if one is rejected.
 
     Raises:
         FlexConfigError: If a limit doesn't convert to ``quantity``'s units —
             for example, a horizon-total quantity was given where a
-            per-period rate was expected.
+            per-period rate was expected — or a series doesn't have one value
+            per period.
     """
     tb = block._find_time_block()
     units = pyunits.get_units(quantity[tb.time_index.first()])
@@ -155,11 +198,11 @@ def add_time_limits(
         sense, prose = _SENSES[suffix]
         param = pyo.Param(
             tb.time_index,
-            initialize=_convert_limit(bound, units, field),
+            initialize=_period_limit_values(bound, units, field, tb.time_index),
             mutable=True,
             units=units,
             doc=f"Per-period {sense} limit on {name}; rewrite it with set_value "
-            "to vary the limit over time.",
+            "to move the limit.",
         )
         block.add_component(f"{name}_{suffix}", param)
         limit = block.component(f"{name}_{suffix}")

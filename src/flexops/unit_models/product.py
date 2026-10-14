@@ -102,6 +102,7 @@ class ProductData(OpsBlockData):
         the delivery, with units. Interpreted according to ``demand_basis``
         (default ``LimitBasis.PERIOD``) as either a rate that must hold
         every period, or a total amount over the whole horizon.
+        On the period basis a limit may also be a length-T series.
 
         ``price`` (default ``None``): a flat price per unit delivered —
         positive is a cost, negative is revenue — billed through
@@ -145,7 +146,8 @@ class ProductData(OpsBlockData):
         "max_demand",
         ConfigValue(
             default=None,
-            description="Units-carrying scalar upper limit on the delivery "
+            description="Units-carrying upper limit on the delivery, a scalar or "
+            "(on the period basis) a length-T series "
             "(e.g. a disposal permit). Its dimension follows demand_basis: a "
             "rate per period, or a quantity over the horizon. Builds a mutable "
             "Param and its Constraint; rewrite the Param to move the bound.",
@@ -155,7 +157,8 @@ class ProductData(OpsBlockData):
         "min_demand",
         ConfigValue(
             default=None,
-            description="Units-carrying scalar lower limit on the delivery "
+            description="Units-carrying lower limit on the delivery, a scalar or "
+            "(on the period basis) a length-T series "
             "(e.g. a contracted demand that must be met). Its dimension "
             "follows demand_basis: a rate per period, or a quantity over the "
             "horizon. Builds a mutable Param and its Constraint.",

@@ -55,6 +55,9 @@ nitpick_ignore = [
     ("py:class", "pandas.core.indexes.datetimes.DatetimeIndex"),
     ("py:class", "pandas.core.series.Series"),
     ("py:class", "pandas._libs.tslibs.timestamps.Timestamp"),
+    # pydantic's NonNegativeFloat is Annotated[float, annotated_types.Ge(0)],
+    # and annotated_types has no intersphinx target.
+    ("py:class", "annotated_types.Ge"),
 ]
 
 # autodoc renders the subscripted generics in a pydantic model's constructor
