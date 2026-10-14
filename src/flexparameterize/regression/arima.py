@@ -34,7 +34,8 @@ Typical usage::
         output_units="m^3/hr",
     )
     result = regressor.to_fit_result()
-    spec  = regressor.to_surrogate_spec()
+    spec  = regressor.to_surrogate_spec()  # last week of history
+    forecast_spec = regressor.to_surrogate_spec(history_length=0)
 
 :class:`ArimaRegressor` attributes:
     model: The fitted
@@ -72,6 +73,7 @@ from flexparameterize.regression.utils.arima_utils import (
     fit_direct,
     fit_output_error_ipopt,
     history_payload,
+    history_steps,
     ma_max_root,
     step_seconds,
     surrogate_coefficients,
@@ -411,6 +413,10 @@ class ArimaRegressor:
             has_const=self._include_mean and d == 0,
             has_drift=d == 1 and self._include_mean,
         )
+        # fit_direct fits once: an equation-error warm start, then (for
+        # output_error) a refinement, then DirectResults, which only evaluates
+        # the final coefficients. With ipopt, `refine` replaces the scipy
+        # refinement step; it does not add a second fit.
         refine = None
         if self._fit_solver == "ipopt":
             refine = partial(
@@ -597,7 +603,7 @@ class ArimaRegressor:
             data_window=self.data_window,
         )
 
-    def to_surrogate_spec(self) -> SurrogateSpec:
+    def to_surrogate_spec(self, history_length="7D") -> SurrogateSpec:
         """Return the fit as a persistable ``arima`` ``SurrogateSpec``.
 
         Uses the ``input_units``/``output_units`` recorded by :meth:`fit`.
@@ -612,8 +618,21 @@ class ArimaRegressor:
           in lag/column order for each non-empty block.
         - ``history``: ``start_date``, ``time_step_seconds``, and the
           disturbance/innovation series the surrogate replays to seed its
-          pre-horizon lags. No true pre-sample data exists, so the first
-          ``max(p + d, q)`` entries repeat the start of the series.
+          pre-horizon lags, covering the last ``history_length`` of the
+          training data plus the ``max(p + d, q)`` lags ahead of it. When the
+          window reaches the start of the series, where no true pre-sample
+          data exists, those lags repeat the start of the series.
+
+        A surrogate built from the spec can start its horizon anywhere from
+        the first kept point onward; a start after the training data is
+        forecast from the terminal state with zero innovations.
+
+        Args:
+            history_length: How much of the training history to keep: a
+                duration (``"7D"``, ``pd.Timedelta(days=7)``), ``0`` to keep
+                only the terminal state for forecast-only use, or ``None``
+                for the full training series. Rounded up to whole steps and
+                capped at the training length.
 
         Returns:
             A :class:`~flexcore.config.schema.SurrogateSpec` of type
@@ -622,9 +641,11 @@ class ArimaRegressor:
         Raises:
             FlexDataError: If :meth:`fit` has not been called.
             FlexConfigError: If ``input_units`` is missing an entry for a
-                fitted exogenous column.
+                fitted exogenous column, or ``history_length`` is invalid.
         """
         self._require_fit("to_surrogate_spec()")
+        time_step_seconds = step_seconds(self._training_index)
+        steps = history_steps(history_length, time_step_seconds)
         missing = [
             name for name in self.exogenous_variables if name not in self.input_units
         ]
@@ -651,7 +672,8 @@ class ArimaRegressor:
                     self.model.resid,
                     self.model.terms,
                     start_date=self._training_index[0].isoformat(),
-                    time_step_seconds=step_seconds(self._training_index),
+                    time_step_seconds=time_step_seconds,
+                    history_steps=steps,
                 ),
             },
         )

@@ -616,6 +616,7 @@ def history_payload(
     terms: ArimaTerms,
     start_date: str,
     time_step_seconds: float,
+    history_steps: int | None = None,
 ) -> dict[str, object]:
     """Build the surrogate ``history`` block from a fitted disturbance series.
 
@@ -624,24 +625,83 @@ def history_payload(
     the series; both lists share one prefix length so one offset indexes
     either.
 
+    ARIMA state is Markov in those ``max(p + d, q)`` lags, so trimming to the
+    last ``history_steps`` modeled points loses nothing for horizons that start
+    inside the kept window or after it: the prefix of a trimmed history holds
+    real fitted values, and ``start_date`` moves to the first kept point. With
+    ``history_steps=0`` only the terminal state is kept, dated one step after
+    the last fitted row, so the surrogate can only forecast from there.
+
     Args:
         eta: Disturbance series ``y - X @ beta`` on the level scale.
         eps: One-step innovations on the differenced series.
         terms: The model structure.
         start_date: ISO-8601 timestamp of the first fitted row.
         time_step_seconds: Sampling step in seconds.
+        history_steps: Modeled points to keep at the end of the series;
+            ``None`` keeps all of them. Values beyond the series length are
+            capped.
 
     Returns:
         The ``history`` mapping in the surrogate's persisted contract.
     """
     seed, lagged = terms.seed, terms.p + terms.d
     prefix = [float(eta[0])] * (seed - lagged) + [float(v) for v in eta[:lagged]]
+    eta_values = prefix + [float(v) for v in eta]
+    eps_values = [0.0] * (seed + terms.d) + [float(v) for v in eps]
+    n = len(eta)
+    dropped = 0 if history_steps is None else n - min(history_steps, n)
+    start = pd.Timestamp(start_date) + pd.Timedelta(
+        seconds=dropped * float(time_step_seconds)
+    )
     return {
-        "start_date": start_date,
+        "start_date": start.isoformat(),
         "time_step_seconds": float(time_step_seconds),
-        "y_values": prefix + [float(v) for v in eta],
-        "eps_values": [0.0] * (seed + terms.d) + [float(v) for v in eps],
+        "eta_values": eta_values[dropped:],
+        "eps_values": eps_values[dropped:],
     }
+
+
+def history_steps(history_length, time_step_seconds: float) -> int | None:
+    """Convert a ``history_length`` request into a count of modeled steps.
+
+    Args:
+        history_length: ``None`` for the full history, ``0`` for the
+            terminal state only, or a duration (``pd.Timedelta``,
+            ``datetime.timedelta``, or a string such as ``"7D"``).
+        time_step_seconds: Sampling step in seconds.
+
+    Returns:
+        ``None``, or the number of steps covering ``history_length``,
+        rounded up to whole steps.
+
+    Raises:
+        FlexConfigError: If ``history_length`` is not one of the accepted
+            forms or is negative.
+    """
+    if history_length is None:
+        return None
+    if isinstance(history_length, (int, float)) and not isinstance(
+        history_length, bool
+    ):
+        if history_length == 0:
+            return 0
+        duration = None
+    else:
+        try:
+            duration = pd.Timedelta(history_length)
+        except (TypeError, ValueError):
+            duration = None
+    if duration is None or pd.isna(duration) or duration < pd.Timedelta(0):
+        raise FlexConfigError(
+            "ArimaRegressor history_length must be None (full history), 0 "
+            "(terminal state only), or a non-negative duration such as "
+            f'"7D" or pd.Timedelta(days=7); got {history_length!r}.',
+            field="history_length",
+            value=history_length,
+        )
+    # Tolerate float error so an exact multiple of the step does not round up.
+    return math.ceil(duration.total_seconds() / time_step_seconds - 1e-9)
 
 
 def step_seconds(index) -> float:
@@ -829,18 +889,20 @@ def fit_output_error_ipopt(
     if terms.n_exog:
         # The history holds eta for rows 0..p+d-1; keep it equal to
         # y - X @ beta at the solver's beta, not the warm start's.
-        block.initial_y_history.unfix()
+        block.initial_eta_history.unfix()
         unit.history_seed = pyo.Constraint(
-            block.y_history_index,
-            rule=lambda _b, i: block.initial_y_history[i]
-            == (
-                float(y[i])
-                - sum(
-                    block.exog_coefs[k + 1] * float(x[i, k])
-                    for k in range(terms.n_exog)
+            block.eta_history_index,
+            rule=lambda _b, i: (
+                block.initial_eta_history[i]
+                == (
+                    float(y[i])
+                    - sum(
+                        block.exog_coefs[k + 1] * float(x[i, k])
+                        for k in range(terms.n_exog)
+                    )
                 )
-            )
-            * parse_units(output_units),
+                * parse_units(output_units)
+            ),
         )
     for index in range(1, terms.q + 1):
         block.ma_coefs[index].setlb(-MA_BOUND)

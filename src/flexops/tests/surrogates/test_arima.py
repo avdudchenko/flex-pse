@@ -63,7 +63,7 @@ def _arima_data(
     q: int = 0,
     n_exog: int = 0,
     deterministic: bool = True,
-    y_history: list[float] | None = None,
+    eta_history: list[float] | None = None,
     eps_history: list[float] | None = None,
 ) -> dict:
     """Return valid data for the clean ARIMA surrogate contract."""
@@ -81,12 +81,12 @@ def _arima_data(
     if deterministic:
         coefficients["intercept" if d == 0 else "drift"] = 0.0
     history_prefix = max(p + d, q)
-    y_prefix = [0.0] * (p + d) if y_history is None else list(y_history)
+    eta_prefix = [0.0] * (p + d) if eta_history is None else list(eta_history)
     eps_prefix = [0.0] * q if eps_history is None else list(eps_history)
-    if y_prefix:
-        y_prefix = [y_prefix[0]] * (history_prefix - len(y_prefix)) + y_prefix
+    if eta_prefix:
+        eta_prefix = [eta_prefix[0]] * (history_prefix - len(eta_prefix)) + eta_prefix
     else:
-        y_prefix = [0.0] * history_prefix
+        eta_prefix = [0.0] * history_prefix
     eps_prefix = [0.0] * (history_prefix - len(eps_prefix)) + eps_prefix
 
     return {
@@ -96,7 +96,7 @@ def _arima_data(
         "history": {
             "start_date": "2025-01-01T00:00:00",
             "time_step_seconds": 900.0,
-            "y_values": y_prefix,
+            "eta_values": eta_prefix,
             "eps_values": eps_prefix,
         },
     }
@@ -207,7 +207,7 @@ def test_validate_rejects_missing_fitted_coefficients_for_forecast(field):
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("field", "values"),
-    [("y_values", []), ("eps_values", [])],
+    [("eta_values", []), ("eps_values", [])],
 )
 def test_validate_rejects_history_prefix_length_mismatch(field, values):
     data = _arima_data(p=1, d=1, q=1)
@@ -220,12 +220,12 @@ def test_validate_rejects_history_prefix_length_mismatch(field, values):
 def test_validate_rejects_history_shorter_than_max_p_d_q():
     """History must cover max(p+d, q), which is what build() slices.
 
-    With q > p+d the old check only demanded p+d y_values, so a too-short
+    With q > p+d the old check only demanded p+d eta_values, so a too-short
     history passed validation and failed later inside build() with a
     misleading "same number of modeled points" message.
     """
     data = _arima_data(p=0, d=0, q=2)
-    data["history"]["y_values"] = []
+    data["history"]["eta_values"] = []
 
     with pytest.raises(FlexConfigError, match=r"max\(p\+d, q\)=2"):
         ArimaSurrogate(data)
@@ -235,7 +235,7 @@ def test_validate_rejects_history_shorter_than_max_p_d_q():
 def test_validate_accepts_history_equal_to_max_p_d_q():
     """A history of exactly max(p+d, q) values is sufficient."""
     data = _arima_data(p=0, d=0, q=2)
-    assert len(data["history"]["y_values"]) == 2
+    assert len(data["history"]["eta_values"]) == 2
     assert len(data["history"]["eps_values"]) == 2
 
     ArimaSurrogate(data)
@@ -282,7 +282,7 @@ def test_max_ar_coeff_rejects_out_of_range_argument():
 
 @pytest.mark.unit
 def test_max_ar_coeff_rejects_fixed_coefficient_above_bound():
-    data = _arima_data(p=1, y_history=[1.0])
+    data = _arima_data(p=1, eta_history=[1.0])
     data["coefficients"]["ar_coefs"] = [0.9]
     with pytest.raises(FlexConfigError, match="max_ar_coeff"):
         ArimaSurrogate(data, max_ar_coeff=0.85)
@@ -291,7 +291,7 @@ def test_max_ar_coeff_rejects_fixed_coefficient_above_bound():
 @pytest.mark.unit
 def test_max_ar_coeff_bounds_the_var_when_unfixed():
     _m, unit = _make_unit()
-    data = _arima_data(p=1, y_history=[1.0])
+    data = _arima_data(p=1, eta_history=[1.0])
     data["coefficients"]["ar_coefs"] = [0.5]
     surrogate = ArimaSurrogate(data, max_ar_coeff=0.85)
     block, _body = surrogate.build(unit, unit.biogas_m3_hour)
@@ -312,7 +312,7 @@ def test_build_creates_fixed_coefficients_state_and_innovations():
     assert isinstance(block.coefficients, CoefficientRegistry)
     assert len(block.coefficients) == 1 + 2 + 2 + 1
     assert all(var.fixed for _name, var in block.coefficients.items())
-    assert all(block.initial_y_history[h].fixed for h in block.initial_y_history)
+    assert all(block.initial_eta_history[h].fixed for h in block.initial_eta_history)
     assert all(block.initial_eps_history[h].fixed for h in block.initial_eps_history)
     assert all(block.eps[t].fixed and block.eps[t].value == 0 for t in block.eps)
     assert block.find_component("eps_constraint") is None
@@ -327,11 +327,12 @@ def test_build_without_initial_state_creates_unfixed_latent_state():
 
     block, _body = ArimaSurrogate(data).build(unit, unit.biogas_m3_hour)
 
-    assert len(block.initial_y_history) == 3
+    assert len(block.initial_eta_history) == 3
     assert len(block.initial_eps_history) == 2
     assert all(
-        not block.initial_y_history[h].fixed and block.initial_y_history[h].value == 0.0
-        for h in block.initial_y_history
+        not block.initial_eta_history[h].fixed
+        and block.initial_eta_history[h].value == 0.0
+        for h in block.initial_eta_history
     )
     assert all(
         not block.initial_eps_history[h].fixed
@@ -413,7 +414,7 @@ def test_body_d0_matches_hand_calculation_and_history_indexing():
         p=2,
         q=2,
         n_exog=1,
-        y_history=[10.0, 20.0],
+        eta_history=[10.0, 20.0],
         eps_history=[1.0, 2.0],
     )
     data["coefficients"].update(
@@ -444,7 +445,7 @@ def test_body_d1_matches_hand_calculation_and_history_indexing():
         d=1,
         q=1,
         n_exog=1,
-        y_history=[7.0, 9.0, 12.0],
+        eta_history=[7.0, 9.0, 12.0],
         eps_history=[2.0],
     )
     data["coefficients"].update(
@@ -487,7 +488,7 @@ def test_body_supports_omitted_deterministic_term(d):
         unit, unit.biogas_m3_hour
     )
     if d == 1:
-        block.initial_y_history[0].set_value(4.0)
+        block.initial_eta_history[0].set_value(4.0)
     block.eps[0].set_value(1.5)
 
     assert pyo.value(body(0)) == pytest.approx(1.5 if d == 0 else 5.5)
@@ -496,7 +497,7 @@ def test_body_supports_omitted_deterministic_term(d):
 @pytest.mark.unit
 def test_body_d1_p0_is_random_walk_with_constant_drift():
     _m, unit = _make_unit()
-    data = _arima_data(p=0, d=1, q=0, y_history=[10.0])
+    data = _arima_data(p=0, d=1, q=0, eta_history=[10.0])
     data["coefficients"]["drift"] = 0.75
     block, body = ArimaSurrogate(data).build(unit, unit.biogas_m3_hour)
     block.eps[0].set_value(-0.25)
@@ -711,7 +712,7 @@ def test_get_regression_objective_does_not_change_fixation():
 @pytest.mark.unit
 def test_get_surrogate_spec_extracts_final_state():
     _m, unit = _make_unit(n_points=3)
-    data = _arima_data(p=2, q=1, y_history=[-2.0, -1.0], eps_history=[-0.5])
+    data = _arima_data(p=2, q=1, eta_history=[-2.0, -1.0], eps_history=[-0.5])
     surrogate = ArimaSurrogate(data)
     block, _body = surrogate.build(unit, unit.biogas_m3_hour)
     for t, value in enumerate((10.0, 11.0, 12.0)):
@@ -727,7 +728,9 @@ def test_get_surrogate_spec_extracts_final_state():
         "coefficients",
         "history",
     }
-    assert state["history"]["y_values"] == pytest.approx([-2.0, -1.0, 10.0, 11.0, 12.0])
+    assert state["history"]["eta_values"] == pytest.approx(
+        [-2.0, -1.0, 10.0, 11.0, 12.0]
+    )
     assert state["history"]["eps_values"] == pytest.approx([0.0, -0.5, 0.1, 0.2, 0.3])
     assert state["history"]["time_step_seconds"] == pytest.approx(900.0)
 
@@ -747,7 +750,7 @@ def test_get_surrogate_spec_omits_zero_order_coefficient_keys():
     assert "ar_coefs" not in state["coefficients"]
     assert "ma_coefs" not in state["coefficients"]
     assert "exog_coefs" not in state["coefficients"]
-    assert state["history"]["y_values"] == pytest.approx([1.0, 2.0])
+    assert state["history"]["eta_values"] == pytest.approx([1.0, 2.0])
     assert state["history"]["eps_values"] == pytest.approx([0.0, 0.0])
 
 
@@ -778,13 +781,13 @@ def test_build_forecasts_missing_history_before_future_start():
     data["history"] = {
         "start_date": "2025-01-01T00:00:00",
         "time_step_seconds": 900.0,
-        "y_values": [10.0, 20.0, 21.0],
+        "eta_values": [10.0, 20.0, 21.0],
         "eps_values": [0.0, 0.0, 0.0],
     }
 
     block, _body, messages = _build_capturing_warnings(ArimaSurrogate(data), unit)
 
-    assert pyo.value(block.initial_y_history[0]) == pytest.approx(6.75)
+    assert pyo.value(block.initial_eta_history[0]) == pytest.approx(6.75)
     assert len(messages) == 1
     assert "2 step(s) before the TimeBlock start" in messages[0]
 
@@ -796,13 +799,13 @@ def test_build_does_not_warn_when_history_ends_at_future_start():
     data["history"] = {
         "start_date": "2025-01-01T00:00:00",
         "time_step_seconds": 900.0,
-        "y_values": [10.0, 20.0, 21.0],
+        "eta_values": [10.0, 20.0, 21.0],
         "eps_values": [0.0, 0.0, 0.0],
     }
 
     block, _body, messages = _build_capturing_warnings(ArimaSurrogate(data), unit)
 
-    assert pyo.value(block.initial_y_history[0]) == pytest.approx(21.0)
+    assert pyo.value(block.initial_eta_history[0]) == pytest.approx(21.0)
     assert messages == []
 
 
@@ -826,7 +829,7 @@ def test_build_does_not_warn_when_history_ends_at_future_start():
             #   step 2: 0.1 + 0.5*(6.12-5) + 0.2*(5-4) + 0.4*0 = 0.86 -> 6.98
             [2, 1, 1],
             {"drift": 0.1, "ar_coefs": [0.5, 0.2], "ma_coefs": [0.4]},
-            {"y_values": [1.0, 2.0, 4.0, 5.0], "eps_values": [0.0, 0.0, 0.5, 0.3]},
+            {"eta_values": [1.0, 2.0, 4.0, 5.0], "eps_values": [0.0, 0.0, 0.5, 0.3]},
             "2025-01-01T00:45:00",
             [5.0, 6.12, 6.98],
             [0.0],
@@ -838,7 +841,7 @@ def test_build_does_not_warn_when_history_ends_at_future_start():
             # Pure MA(2): 1.0 + 0.5*0.8 + 0.25*0.4 = 1.5.
             [0, 0, 2],
             {"intercept": 1.0, "ma_coefs": [0.5, 0.25]},
-            {"y_values": [0.0, 0.0, 3.0], "eps_values": [0.2, 0.4, 0.8]},
+            {"eta_values": [0.0, 0.0, 3.0], "eps_values": [0.2, 0.4, 0.8]},
             "2025-01-01T00:30:00",
             [],
             [0.8, 0.0],
@@ -850,7 +853,7 @@ def test_build_does_not_warn_when_history_ends_at_future_start():
             # Next horizon starts right after the last stored point.
             [2, 1, 1],
             {"drift": 0.1, "ar_coefs": [0.5, 0.2], "ma_coefs": [0.4]},
-            {"y_values": [1.0, 2.0, 4.0, 5.0], "eps_values": [0.0, 0.0, 0.5, 0.3]},
+            {"eta_values": [1.0, 2.0, 4.0, 5.0], "eps_values": [0.0, 0.0, 0.5, 0.3]},
             "2025-01-01T00:15:00",
             [2.0, 4.0, 5.0],
             [0.3],
@@ -882,7 +885,7 @@ def test_build_initial_state_after_history(
 
     block, body, messages = _build_capturing_warnings(ArimaSurrogate(data), unit)
 
-    assert [pyo.value(v) for v in block.initial_y_history.values()] == (
+    assert [pyo.value(v) for v in block.initial_eta_history.values()] == (
         pytest.approx(expected_y)
     )
     assert [pyo.value(v) for v in block.initial_eps_history.values()] == (
@@ -899,7 +902,7 @@ def test_build_initial_state_after_history(
 @pytest.mark.unit
 def test_validate_rejects_history_series_with_different_lengths():
     data = _arima_data(p=1, q=1)
-    data["history"]["y_values"] = [0.0, 1.0, 2.0]
+    data["history"]["eta_values"] = [0.0, 1.0, 2.0]
     data["history"]["eps_values"] = [0.0, 0.5]
 
     with pytest.raises(FlexConfigError, match="same number of modeled points"):
@@ -925,7 +928,7 @@ def test_get_surrogate_spec_preserves_solved_eps_values_for_next_horizon():
 @pytest.mark.unit
 def test_get_surrogate_spec_roundtrip_preserves_equation():
     _m, unit = _make_unit(n_points=3)
-    data = _arima_data(p=1, d=1, q=1, y_history=[5.0, 7.0], eps_history=[0.25])
+    data = _arima_data(p=1, d=1, q=1, eta_history=[5.0, 7.0], eps_history=[0.25])
     data["coefficients"].update({"drift": 0.2, "ar_coefs": [0.4], "ma_coefs": [0.3]})
     surrogate = ArimaSurrogate(data)
     block, body = surrogate.build(unit, unit.biogas_m3_hour)
@@ -974,7 +977,7 @@ def test_in_model_regression_estimates_omitted_initial_state():
     result = pyo.SolverFactory("ipopt").solve(m)
     pyo.assert_optimal_termination(result)
 
-    assert pyo.value(block.initial_y_history[0]) == pytest.approx(4.0)
+    assert pyo.value(block.initial_eta_history[0]) == pytest.approx(4.0)
     assert all(
         pyo.value(block.eps[t]) == pytest.approx(0.0, abs=1e-7) for t in block.time
     )
@@ -1002,7 +1005,7 @@ def test_direct_regression_recovers_conditional_least_squares_ar1():
 
     m, unit = _make_unit(n_points=n)
     _add_swappable_relation(unit)
-    data = _arima_data(p=1, y_history=[initial_y])
+    data = _arima_data(p=1, eta_history=[initial_y])
     block = unit.swap_relation("biogas_m3_hour_relation", ArimaSurrogate(data))
     for t, value in enumerate(observed):
         unit.biogas_m3_hour[t].fix(float(value))

@@ -308,7 +308,7 @@ def test_surrogate_spec_data_contract():
     assert isinstance(data["coefficients"]["intercept"], float)
     assert isinstance(data["coefficients"]["exog_coefs"], list)
     assert len(data["coefficients"]["exog_coefs"]) == 1
-    assert len(data["history"]["y_values"]) == n
+    assert len(data["history"]["eta_values"]) == n
     assert len(data["history"]["eps_values"]) == n
 
 
@@ -1717,9 +1717,9 @@ def test_ipopt_history_seed_tracks_the_fitted_exog_coefficients(monkeypatch):
 
     block = solved[0].unit.arima
     beta = pyo.value(block.exog_coefs[1])
-    for index in block.y_history_index:
+    for index in block.eta_history_index:
         expected = y["biogas"].iloc[index] - beta * feed[index]
-        assert pyo.value(block.initial_y_history[index]) == pytest.approx(
+        assert pyo.value(block.initial_eta_history[index]) == pytest.approx(
             expected, abs=1e-8
         )
 
@@ -1849,3 +1849,108 @@ def test_fit_requires_datetime_index():
     y = pd.DataFrame({"y": np.random.default_rng(0).normal(size=40)})
     with pytest.raises(FlexDataError, match="DatetimeIndex.*got RangeIndex"):
         ArimaRegressor(order=(1, 0, 0)).fit(pd.DataFrame(index=y.index), y)
+
+
+# -- history_length -----------------------------------------------------------
+
+
+def _fitted_arimax(n: int = 400):
+    """Return an ARIMAX(1, 1, 1) fit on ``n`` hourly rows."""
+    pytest.importorskip("scipy")
+    rng = np.random.default_rng(17)
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    feed = pd.Series(rng.uniform(0.5, 1.5, size=n), index=idx, name="feed")
+    eta = np.cumsum(rng.normal(0, 0.05, size=n))
+    y = pd.DataFrame({"biogas": 2.0 * feed.to_numpy() + eta}, index=idx)
+    regressor = ArimaRegressor(order=(1, 1, 1), max_ar_persistence=None).fit(
+        pd.DataFrame({"feed": feed}),
+        y,
+        input_units={"feed": "kg/hr"},
+        output_units="m^3/hr",
+    )
+    return regressor, idx
+
+
+def _initial_state_at(spec, start: pd.Timestamp):
+    """Return the surrogate's pre-horizon ``(eta, eps)`` lags at ``start``."""
+    import pyomo.environ as pyo
+    from pyomo.environ import units as pyunits
+
+    from flexops.core.time_block import TimeBlock
+
+    model = pyo.ConcreteModel()
+    model.time_block = TimeBlock(
+        start_date=start.isoformat(),
+        end_date=(start + pd.Timedelta(hours=3)).isoformat(),
+        time_step=1 * pyunits.hr,
+    )
+    return ArimaSurrogate(spec.data)._initial_state(model.time_block)
+
+
+@pytest.mark.unit
+def test_surrogate_spec_default_history_keeps_one_week():
+    regressor, idx = _fitted_arimax()
+
+    history = regressor.to_surrogate_spec().data["history"]
+
+    # 168 hourly points plus the max(p + d, q) = 2 lags ahead of them.
+    assert len(history["eta_values"]) == 168 + 2
+    assert len(history["eps_values"]) == 168 + 2
+    assert pd.Timestamp(history["start_date"]) == idx[-168]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("offset", [-72, -1])
+def test_trimmed_history_matches_full_history_inside_the_window(offset):
+    """Trimming loses nothing for a horizon that starts in the kept window."""
+    regressor, idx = _fitted_arimax()
+    full = regressor.to_surrogate_spec(history_length=None)
+    trimmed = regressor.to_surrogate_spec(history_length="3D")
+
+    full_state = _initial_state_at(full, idx[offset])
+    trimmed_state = _initial_state_at(trimmed, idx[offset])
+
+    for full_lags, trimmed_lags in zip(full_state, trimmed_state, strict=True):
+        assert trimmed_lags == pytest.approx(full_lags)
+
+
+@pytest.mark.unit
+def test_zero_history_holds_the_terminal_state_for_forecasting(monkeypatch):
+    """history_length=0 starts a horizon right after training with no forecast."""
+    from flexops.surrogates import arima as arima_surrogate
+
+    messages: list[str] = []
+    monkeypatch.setattr(
+        arima_surrogate._log, "warning", lambda msg, *args: messages.append(msg)
+    )
+    regressor, idx = _fitted_arimax()
+    full = regressor.to_surrogate_spec(history_length=None)
+    terminal = regressor.to_surrogate_spec(history_length=0)
+    after_training = idx[-1] + pd.Timedelta(hours=1)
+
+    assert len(terminal.data["history"]["eta_values"]) == 2
+    assert pd.Timestamp(terminal.data["history"]["start_date"]) == after_training
+    for full_lags, terminal_lags in zip(
+        _initial_state_at(full, after_training),
+        _initial_state_at(terminal, after_training),
+        strict=True,
+    ):
+        assert terminal_lags == pytest.approx(full_lags)
+    assert messages == []
+
+
+@pytest.mark.unit
+def test_horizon_before_trimmed_history_names_the_fix():
+    regressor, idx = _fitted_arimax()
+    trimmed = regressor.to_surrogate_spec(history_length="1D")
+
+    with pytest.raises(FlexConfigError, match="longer history_length"):
+        _initial_state_at(trimmed, idx[-48])
+
+
+@pytest.mark.unit
+def test_surrogate_spec_rejects_invalid_history_length():
+    regressor, _idx = _fitted_arimax()
+
+    with pytest.raises(FlexConfigError, match="history_length"):
+        regressor.to_surrogate_spec(history_length=-1)

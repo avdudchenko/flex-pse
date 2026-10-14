@@ -7,11 +7,14 @@ rather than as a drifted fit downstream.
 
 from __future__ import annotations
 
+import datetime
 import warnings
 
 import numpy as np
+import pandas as pd
 import pytest
 
+from flexcore.exceptions import FlexConfigError
 from flexparameterize.regression.utils.arima_utils import (
     AUTO_MAX_HORIZON,
     ArimaTerms,
@@ -23,6 +26,7 @@ from flexparameterize.regression.utils.arima_utils import (
     equation_error_residuals,
     free_run,
     history_payload,
+    history_steps,
     ma_max_root,
     one_step_innovations,
     output_error_residuals,
@@ -269,9 +273,83 @@ def test_history_payload_pads_both_series_to_a_shared_prefix():
     payload = history_payload(eta, eps, terms, "2024-01-01T00:00:00", 900.0)
 
     # seed = max(p + d, q) = 3; the y prefix repeats eta[0] ahead of eta[:p + d]
-    assert payload["y_values"] == [1.0, 1.0, 2.0, 1.0, 2.0, 3.0, 4.0]
+    assert payload["eta_values"] == [1.0, 1.0, 2.0, 1.0, 2.0, 3.0, 4.0]
     assert payload["eps_values"] == [0.0] * 4 + [0.0, 0.1, 0.2]
     assert payload["time_step_seconds"] == 900.0
+
+
+@pytest.mark.unit
+def test_history_payload_trims_to_the_trailing_window():
+    """A trimmed history is the tail of the full one, re-dated to its start."""
+    terms = ArimaTerms(p=1, d=1, q=3, n_exog=0, has_const=False, has_drift=True)
+    eta = np.arange(1.0, 9.0)
+    eps = np.linspace(0.1, 0.7, 7)
+    full = history_payload(eta, eps, terms, "2024-01-01T00:00:00", 900.0)
+
+    trimmed = history_payload(
+        eta, eps, terms, "2024-01-01T00:00:00", 900.0, history_steps=2
+    )
+
+    # seed = 3 lags ahead of the 2 kept points, all real fitted values.
+    assert trimmed["eta_values"] == full["eta_values"][-5:]
+    assert trimmed["eps_values"] == full["eps_values"][-5:]
+    assert trimmed["eta_values"][:3] == [4.0, 5.0, 6.0]
+    assert trimmed["start_date"] == "2024-01-01T01:30:00"
+
+
+@pytest.mark.unit
+def test_history_payload_zero_steps_keeps_only_the_terminal_state():
+    """history_steps=0 keeps max(p+d, q) lags, dated one step after the end."""
+    terms = ArimaTerms(p=2, d=0, q=1, n_exog=0, has_const=True, has_drift=False)
+    eta = np.array([1.0, 2.0, 3.0, 4.0])
+    eps = np.array([0.1, 0.2, 0.3, 0.4])
+
+    payload = history_payload(
+        eta, eps, terms, "2024-01-01T00:00:00", 3600.0, history_steps=0
+    )
+
+    assert payload["eta_values"] == [3.0, 4.0]
+    assert payload["eps_values"] == [0.3, 0.4]
+    assert payload["start_date"] == "2024-01-01T04:00:00"
+
+
+@pytest.mark.unit
+def test_history_payload_caps_steps_at_the_series_length():
+    terms = ArimaTerms(p=1, d=0, q=0, n_exog=0, has_const=True, has_drift=False)
+    eta = np.array([1.0, 2.0, 3.0])
+    eps = np.array([0.0, 0.1, 0.2])
+
+    full = history_payload(eta, eps, terms, "2024-01-01T00:00:00", 900.0)
+    capped = history_payload(
+        eta, eps, terms, "2024-01-01T00:00:00", 900.0, history_steps=50
+    )
+
+    assert capped == full
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "history_length, step, expected",
+    [
+        (None, 900.0, None),
+        (0, 900.0, 0),
+        ("7D", 900.0, 672),
+        (pd.Timedelta(hours=3), 3600.0, 3),
+        (datetime.timedelta(minutes=90), 3600.0, 2),
+        ("0s", 900.0, 0),
+    ],
+)
+def test_history_steps_converts_durations_to_whole_steps(
+    history_length, step, expected
+):
+    assert history_steps(history_length, step) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("history_length", [5, 1.5, True, "-1D", "not a duration"])
+def test_history_steps_rejects_invalid_lengths(history_length):
+    with pytest.raises(FlexConfigError, match="history_length"):
+        history_steps(history_length, 900.0)
 
 
 @pytest.mark.unit

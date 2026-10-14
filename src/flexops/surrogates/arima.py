@@ -18,7 +18,7 @@ and only the state needed immediately before the local Pyomo horizon::
         "history": {
             "start_date": "2025-01-01T00:00:00",
             "time_step_seconds": 900.0,
-            "y_values": [...],
+            "eta_values": [...],    # disturbance y - x @ beta
             "eps_values": [...],
         },
     }
@@ -84,7 +84,7 @@ _COEFFICIENT_KEYS = {
 _HISTORY_KEYS = {
     "start_date",
     "time_step_seconds",
-    "y_values",
+    "eta_values",
     "eps_values",
 }
 
@@ -105,14 +105,14 @@ class _ParsedHistory:
 
     start: datetime.datetime
     step_seconds: float
-    y_values: tuple[float, ...]
+    eta_values: tuple[float, ...]
     eps_values: tuple[float, ...]
     prefix: int
 
     @property
     def modeled_count(self) -> int:
         """Return how many modeled points follow the shared prefix."""
-        return len(self.y_values) - self.prefix
+        return len(self.eta_values) - self.prefix
 
 
 @dataclass(frozen=True)
@@ -135,11 +135,11 @@ class _ParsedArima:
 
 
 def _extend_history(
-    parsed: _ParsedArima, y_values: list[float], eps_values: list[float], count: int
+    parsed: _ParsedArima, eta_values: list[float], eps_values: list[float], count: int
 ) -> None:
     """Append ``count`` zero-innovation forecast steps to the history lists.
 
-    ``y_values`` holds disturbance levels (output minus exogenous term), so
+    ``eta_values`` holds disturbance levels (output minus exogenous term), so
     the forecast needs no exogenous inputs. Each step is the conditional
     mean of the ARIMA equation with the new innovation set to zero.
     """
@@ -148,14 +148,14 @@ def _extend_history(
     for _ in range(count):
         ar_part = sum(
             parsed.ar_coefs[lag - 1]
-            * (y_values[-lag] if d == 0 else y_values[-lag] - y_values[-lag - 1])
+            * (eta_values[-lag] if d == 0 else eta_values[-lag] - eta_values[-lag - 1])
             for lag in range(1, p + 1)
         )
         ma_part = sum(
             parsed.ma_coefs[lag - 1] * eps_values[-lag] for lag in range(1, q + 1)
         )
         mean = constant + ar_part + ma_part
-        y_values.append(mean if d == 0 else y_values[-1] + mean)
+        eta_values.append(mean if d == 0 else eta_values[-1] + mean)
         eps_values.append(0.0)
 
 
@@ -283,8 +283,7 @@ def _scale_for_time(block, innovation_scale, t):
         ) from exc
     if magnitude <= 0:
         raise FlexConfigError(
-            f"ARIMA innovation_scale at time {t!r} must be positive, "
-            f"got {magnitude}.",
+            f"ARIMA innovation_scale at time {t!r} must be positive, got {magnitude}.",
             field="innovation_scale",
             value=magnitude,
         )
@@ -571,10 +570,10 @@ class ArimaSurrogate(Surrogate):
                     field="history.time_step_seconds",
                     value=step_seconds,
                 )
-            y_values = _require_numeric_list(
-                history["y_values"],
-                field="history.y_values",
-                expected_length=len(history["y_values"]),
+            eta_values = _require_numeric_list(
+                history["eta_values"],
+                field="history.eta_values",
+                expected_length=len(history["eta_values"]),
             )
             eps_values = _require_numeric_list(
                 history["eps_values"],
@@ -583,7 +582,7 @@ class ArimaSurrogate(Surrogate):
             )
             history_prefix = _history_prefix(p, d, q)
             for field_name, values in (
-                ("y_values", y_values),
+                ("eta_values", eta_values),
                 ("eps_values", eps_values),
             ):
                 if len(values) < history_prefix:
@@ -594,9 +593,9 @@ class ArimaSurrogate(Surrogate):
                         field=f"history.{field_name}",
                         value=len(values),
                     )
-            if len(y_values) != len(eps_values):
+            if len(eta_values) != len(eps_values):
                 raise FlexConfigError(
-                    "ARIMA history y_values and eps_values must contain the "
+                    "ARIMA history eta_values and eps_values must contain the "
                     "same number of modeled points.",
                     field="history",
                     value=history,
@@ -604,7 +603,7 @@ class ArimaSurrogate(Surrogate):
             parsed_history = _ParsedHistory(
                 start=start,
                 step_seconds=step_seconds,
-                y_values=tuple(y_values),
+                eta_values=tuple(eta_values),
                 eps_values=tuple(eps_values),
                 prefix=history_prefix,
             )
@@ -632,7 +631,7 @@ class ArimaSurrogate(Surrogate):
         return dict(self.data["output_variables"])
 
     def _initial_state(self, time_block) -> tuple[list[float], list[float]]:
-        """Return the pre-horizon ``(y, eps)`` lags ``history`` implies.
+        """Return the pre-horizon ``(eta, eps)`` lags ``history`` implies.
 
         When ``history`` ends before the ``TimeBlock`` starts, the missing
         steps are forecast with zero innovations and a warning is logged.
@@ -641,7 +640,7 @@ class ArimaSurrogate(Surrogate):
             time_block: The model's ``TimeBlock``.
 
         Returns:
-            The ``p + d`` output lags and ``q`` innovation lags immediately
+            The ``p + d`` disturbance lags and ``q`` innovation lags immediately
             preceding the first modeled point, oldest to newest.
 
         Raises:
@@ -654,14 +653,21 @@ class ArimaSurrogate(Surrogate):
         offset = (current_start - history.start).total_seconds() / history.step_seconds
         offset_index = round(offset)
         if offset < 0 or abs(offset - offset_index) > 1e-8:
+            reason = (
+                "starts before the stored history, which begins at "
+                f"{history.start.isoformat()}; re-export the spec with a "
+                "longer history_length, or history_length=None for the full "
+                "training series"
+                if offset < 0
+                else "is off the history's step grid starting at "
+                f"{history.start.isoformat()} with step {history.step_seconds}s"
+            )
             raise FlexConfigError(
-                "ARIMA history does not align with the TimeBlock start date; "
-                f"got {current_start.isoformat()} for training start "
-                f"{history.start.isoformat()} and step {history.step_seconds}s.",
+                f"ARIMA TimeBlock start date {current_start.isoformat()} {reason}.",
                 field="history.start_date",
                 value=current_start,
             )
-        y_values = list(history.y_values)
+        eta_values = list(history.eta_values)
         eps_values = list(history.eps_values)
         missing = offset_index - history.modeled_count
         if missing > 0:
@@ -672,10 +678,10 @@ class ArimaSurrogate(Surrogate):
                 missing,
                 current_start.isoformat(),
             )
-            _extend_history(parsed, y_values, eps_values, missing)
+            _extend_history(parsed, eta_values, eps_values, missing)
         end = history.prefix + offset_index
         return (
-            y_values[end - (parsed.p + parsed.d) : end],
+            eta_values[end - (parsed.p + parsed.d) : end],
             eps_values[end - parsed.q : end],
         )
 
@@ -708,9 +714,9 @@ class ArimaSurrogate(Surrogate):
         state_provided = parsed.history is not None
         time_block = find_time_block(unit.model())
         if state_provided:
-            y_history, eps_history = self._initial_state(time_block)
+            eta_history, eps_history = self._initial_state(time_block)
         else:
-            y_history = [0.0] * (p + d)
+            eta_history = [0.0] * (p + d)
             eps_history = [0.0] * q
         exog_names = list(self.input_variables)
         exog_coefs = parsed.exog_coefs
@@ -808,16 +814,21 @@ class ArimaSurrogate(Surrogate):
                 f"exog.{name}", block.exog_coefs[index]
             )
 
-        block.y_history_index = pyo.Set(initialize=range(len(y_history)), ordered=True)
-        block.initial_y_history = pyo.Var(
-            block.y_history_index,
-            initialize={index: value for index, value in enumerate(y_history)},
+        block.eta_history_index = pyo.Set(
+            initialize=range(len(eta_history)), ordered=True
+        )
+        block.initial_eta_history = pyo.Var(
+            block.eta_history_index,
+            initialize={index: value for index, value in enumerate(eta_history)},
             units=output_units,
-            doc="Pre-horizon output levels, oldest to newest",
+            doc=(
+                "Pre-horizon disturbance levels (output minus exogenous "
+                "term), oldest to newest"
+            ),
         )
         if state_provided:
-            for index, value in enumerate(y_history):
-                block.initial_y_history[index].fix(value)
+            for index, value in enumerate(eta_history):
+                block.initial_eta_history[index].fix(value)
 
         block.eps_history_index = pyo.Set(
             initialize=range(len(eps_history)), ordered=True
@@ -855,15 +866,15 @@ class ArimaSurrogate(Surrogate):
             if position >= 0:
                 y_val = pyunits.convert(target[time_values[position]], output_units)
                 return y_val - exog_at(position)
-            history_index = len(y_history) + position
+            history_index = len(eta_history) + position
             if history_index < 0:
                 raise FlexConfigError(
                     f"ARIMA disturbance lag at local position {position} exceeds "
-                    f"the {len(y_history)} stored y_history values.",
-                    field="history.y_values",
+                    f"the {len(eta_history)} stored eta_history values.",
+                    field="history.eta_values",
                     value=position,
                 )
-            return block.initial_y_history[history_index]
+            return block.initial_eta_history[history_index]
 
         def difference_at(position: int):
             """Return first difference of disturbance at one position."""
@@ -953,7 +964,7 @@ class ArimaSurrogate(Surrogate):
             for name in block._exog_names
         ]
 
-        y_values = [
+        eta_values = [
             float(
                 pyo.value(
                     pyunits.convert(
@@ -965,9 +976,9 @@ class ArimaSurrogate(Surrogate):
             )
             for t in block._time_values
         ]
-        previous_y = [
-            float(pyo.value(block.initial_y_history[index] / output_units))
-            for index in block.y_history_index
+        previous_eta = [
+            float(pyo.value(block.initial_eta_history[index] / output_units))
+            for index in block.eta_history_index
         ]
         eps_values = [
             float(pyo.value(block.eps[t] / output_units)) for t in block._time_values
@@ -977,12 +988,12 @@ class ArimaSurrogate(Surrogate):
             for index in block.eps_history_index
         ]
         history_prefix = _history_prefix(p, d, q)
-        if previous_y:
-            previous_y = [previous_y[0]] * (
-                history_prefix - len(previous_y)
-            ) + previous_y
+        if previous_eta:
+            previous_eta = [previous_eta[0]] * (
+                history_prefix - len(previous_eta)
+            ) + previous_eta
         else:
-            previous_y = [0.0] * history_prefix
+            previous_eta = [0.0] * history_prefix
         previous_eps = [0.0] * (history_prefix - len(previous_eps)) + previous_eps
         time_block = find_time_block(target.model())
         history = {
@@ -992,7 +1003,7 @@ class ArimaSurrogate(Surrogate):
                     pyunits.convert(time_block.config.time_step, to_units=pyunits.s)
                 )
             ),
-            "y_values": previous_y + y_values,
+            "eta_values": previous_eta + eta_values,
             "eps_values": previous_eps + eps_values,
         }
 
