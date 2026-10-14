@@ -82,6 +82,18 @@ def test_coefficient_registry_register_coefficient_non_var_raises():
 
 
 @pytest.mark.unit
+def test_coefficient_registry_register_coefficient_rejects_indexed_var():
+    """A whole indexed Var must go through register_coefficients instead."""
+    m = pyo.ConcreteModel()
+    m.coefs = pyo.Var(["a", "b"], initialize=1.0)
+
+    registry = CoefficientRegistry()
+    with pytest.raises(FlexConfigError, match="indexed Var.*register_coefficients"):
+        registry.register_coefficient("coefs", m.coefs)
+    assert len(registry) == 0
+
+
+@pytest.mark.unit
 def test_coefficient_registry_register_coefficients_bulk():
     """Bulk registration adds every valid entry."""
     registry = CoefficientRegistry()
@@ -103,40 +115,6 @@ def test_coefficient_registry_register_coefficients_bulk_raises_on_bad_entry():
             {"a": pyo.Var(initialize=1.0), "b": pyo.Var(initialize=2.0)}
         )
     assert len(registry) == 1
-
-
-@pytest.mark.unit
-def test_coefficient_registry_indexed_var_iter():
-    """__iter__ yields index keys from _indexed_vars (line 123)."""
-    m = pyo.ConcreteModel()
-    m.idx = pyo.Set(initialize=["a", "b"])
-    m.coefs = pyo.Var(m.idx, initialize=1.0)
-    m.idx.construct()
-    m.coefs.construct()
-
-    registry = CoefficientRegistry()
-    registry.register_coefficient("coefs", m.coefs)
-
-    assert set(registry) == {"a", "b"}
-
-
-@pytest.mark.unit
-def test_coefficient_registry_indexed_var_fix_unfix():
-    """fix/unfix traverse _indexed_vars entries (lines 136-139, 147-150)."""
-    m = pyo.ConcreteModel()
-    m.idx = pyo.Set(initialize=["a", "b"])
-    m.coefs = pyo.Var(m.idx, initialize=1.0)
-    m.idx.construct()
-    m.coefs.construct()
-
-    registry = CoefficientRegistry()
-    registry.register_coefficient("coefs", m.coefs)
-
-    registry.fix()
-    assert m.coefs["a"].is_fixed() and m.coefs["b"].is_fixed()
-
-    registry.unfix()
-    assert not m.coefs["a"].is_fixed() and not m.coefs["b"].is_fixed()
 
 
 @pytest.mark.unit
@@ -200,47 +178,8 @@ def test_coefficient_registry_indexed_var_getitem_missing_raises():
 
 
 @pytest.mark.unit
-def test_coefficient_registry_register_coefficient_stores_indexed_var():
-    """register_coefficient with an indexed Var routes to _indexed_vars (line 77)."""
-    m = pyo.ConcreteModel()
-    m.idx = pyo.Set(initialize=["a", "b"])
-    m.coefs = pyo.Var(m.idx, initialize=1.0)
-    m.idx.construct()
-    m.coefs.construct()
-
-    registry = CoefficientRegistry()
-    registry.register_coefficient("coefs", m.coefs)
-
-    assert "coefs" in registry
-    assert "a" in registry
-    assert "b" in registry
-    assert registry["a"] is m.coefs["a"]
-    assert registry["b"] is m.coefs["b"]
-    assert len(registry) == 2
-
-
-@pytest.mark.unit
-def test_coefficient_registry_indexed_var_items_yields_vardata():
-    """items() yields (key, VarData) pairs from _indexed_vars (lines 103-105)."""
-    m = pyo.ConcreteModel()
-    m.idx = pyo.Set(initialize=["intercept", "flow_out"])
-    m.coefs = pyo.Var(m.idx, initialize=1.0)
-    m.idx.construct()
-    m.coefs.construct()
-
-    registry = CoefficientRegistry()
-    registry.register_coefficient("coefs", m.coefs)
-
-    items = list(registry.items())
-    assert len(items) == 2
-    assert items[0][0] in ("intercept", "flow_out")
-    assert items[0][1] is m.coefs[items[0][0]]
-    assert not items[0][1].is_indexed()
-
-
-@pytest.mark.unit
-def test_coefficient_registry_indexed_var_getitem_uses_indexed_vars():
-    """__getitem__ resolves from _indexed_vars (lines 110-112)."""
+def test_coefficient_registry_bulk_indexed_var_getitem():
+    """__getitem__ resolves an entry registered from an indexed Var."""
     m = pyo.ConcreteModel()
     m.idx = pyo.Set(initialize=["a"])
     m.coefs = pyo.Var(m.idx, initialize=1.0)
@@ -254,8 +193,8 @@ def test_coefficient_registry_indexed_var_getitem_uses_indexed_vars():
 
 
 @pytest.mark.unit
-def test_coefficient_registry_indexed_var_iter_uses_indexed_vars():
-    """__iter__ yields from _indexed_vars (line 123)."""
+def test_coefficient_registry_bulk_indexed_var_iter():
+    """__iter__ yields the index keys of a bulk-registered indexed Var."""
     m = pyo.ConcreteModel()
     m.idx = pyo.Set(initialize=["a", "b"])
     m.coefs = pyo.Var(m.idx, initialize=1.0)
