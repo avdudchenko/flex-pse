@@ -366,24 +366,6 @@ def test_surrogate_spec_keeps_a_zero_valued_fitted_intercept():
 
 
 @pytest.mark.unit
-def test_aicc_is_none_when_undefined_instead_of_raising(caplog):
-    """Too few effective rows makes the AICc correction term undefined.
-
-    This used to raise ZeroDivisionError from inside fit() itself, via
-    model_ -> _aicc_from_direct, on a fit the row check accepts.
-    """
-    pytest.importorskip("scipy")
-
-    idx = pd.date_range("2024-01-01", periods=3, freq="1h")
-    y = pd.DataFrame({"y": [1.0, 2.0, 3.5]}, index=idx)
-
-    regressor = ArimaRegressor(order=(0, 0, 0)).fit(pd.DataFrame(index=idx), y)
-
-    assert regressor.fitted is True
-    assert regressor.fit_diagnostics()["aicc"] is None
-
-
-@pytest.mark.unit
 def test_information_criteria_exclude_zero_padded_residuals():
     """AIC/BIC/sigma2 must not be diluted by the zero-padded leading lags.
 
@@ -456,7 +438,7 @@ def test_missing_input_units_raises():
 
 @pytest.mark.unit
 def test_fit_diagnostics_keys():
-    """fit_diagnostics returns AIC, BIC, AICc, RMSE, log-likelihood."""
+    """fit_diagnostics returns finite fit statistics under fixed keys."""
     pytest.importorskip("scipy")
 
     rng = np.random.default_rng(6)
@@ -469,11 +451,19 @@ def test_fit_diagnostics_keys():
         pd.DataFrame(index=idx), y
     )
     diag = regressor.fit_diagnostics()
-    assert np.isfinite(diag["aic"])
-    assert np.isfinite(diag["bic"])
-    assert np.isfinite(diag["aicc"])
-    assert np.isfinite(diag["rmse"])
-    assert np.isfinite(diag["log_likelihood"])
+    assert set(diag) == {
+        "aic",
+        "bic",
+        "log_likelihood",
+        "n_parameters",
+        "n_samples",
+        "sigma2",
+        "rmse",
+        "free_run_rmse",
+        "forecast_horizon",
+        "ma_max_root",
+    }
+    assert all(np.isfinite(value) for value in diag.values())
 
 
 @pytest.mark.unit
@@ -691,7 +681,6 @@ def test_biogas_matches_statsmodels_insample_and_forecast(order):
         steps=steps,
         exog=X_train.values[offset:],
         start=offset,
-        dynamic=True,
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -777,92 +766,6 @@ def test_d_greater_than_zero_raises():
 
 
 @pytest.mark.unit
-def test_D_greater_than_zero_raises():
-    """Seasonal order with D>0 raises FlexConfigError."""
-    with pytest.raises(FlexConfigError, match="D=0"):
-        ArimaRegressor(order=(1, 0, 0), seasonal_order=(0, 1, 0, 24))
-
-
-@pytest.mark.unit
-def test_seasonal_P_or_Q_greater_than_zero_raises():
-    """Seasonal AR/MA terms (P>0 or Q>0) raise FlexConfigError at construction.
-
-    The direct-fit backend does not support seasonal AR/MA terms at all;
-    this must fail fast (at __init__), not deep inside fit() with a
-    NotImplementedError.
-    """
-    with pytest.raises(FlexConfigError, match="seasonal"):
-        ArimaRegressor(order=(1, 0, 0), seasonal_order=(1, 0, 0, 24))
-    with pytest.raises(FlexConfigError, match="seasonal"):
-        ArimaRegressor(order=(1, 0, 0), seasonal_order=(0, 0, 1, 24))
-    # The trivial (0, 0, 0, m) seasonal order is accepted (a no-op).
-    regressor = ArimaRegressor(order=(1, 0, 0), seasonal_order=(0, 0, 0, 24))
-    assert regressor.seasonal_order == (0, 0, 0, 24)
-
-
-@pytest.mark.unit
-def test_auto_arima_seasonal_search_with_nonzero_PQ_raises(monkeypatch):
-    """auto=True with a seasonal search that selects P>0/Q>0 raises
-    FlexConfigError (not a bare NotImplementedError) rather than crashing
-    deep inside the direct-fit backend.
-
-    ``auto_select_order`` is monkeypatched to deterministically return a
-    seasonal order with P>0, since AutoARIMA's own seasonal search is a
-    heuristic that cannot be relied on to pick one on demand.
-    """
-    pytest.importorskip("scipy")
-
-    import flexparameterize.regression.arima as arima_module
-
-    monkeypatch.setattr(
-        arima_module,
-        "auto_select_order",
-        lambda *a, **k: ((1, 0, 0), (1, 0, 0, 24)),
-    )
-
-    rng = np.random.default_rng(3)
-    n = 60
-    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
-    y = pd.DataFrame({"y": rng.normal(size=n)}, index=idx)
-
-    regressor = ArimaRegressor(
-        auto=True, seasonal_order=(0, 0, 0, 24), max_ar_persistence=None
-    )
-    with pytest.raises(FlexConfigError, match="seasonal"):
-        regressor.fit(pd.DataFrame(index=idx), y)
-
-
-@pytest.mark.unit
-def test_include_drift_raises_with_d0():
-    """include_drift=True with d=0 raises FlexConfigError."""
-    with pytest.raises(FlexConfigError, match="include_drift"):
-        ArimaRegressor(order=(1, 0, 0), include_drift=True)
-
-
-@pytest.mark.unit
-def test_include_drift_with_d1_fits_and_spec_includes_drift():
-    """include_drift=True with d=1 fits and spec emits drift."""
-    pytest.importorskip("scipy")
-
-    rng = np.random.default_rng(99)
-    n = 80
-    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
-    # Generate data with a linear trend so drift is meaningful
-    vals = 0.1 * np.arange(n) + rng.normal(0, 0.1, size=n)
-    y = pd.DataFrame({"y": vals}, index=idx)
-
-    regressor = ArimaRegressor(
-        order=(1, 1, 0), include_drift=True, max_ar_persistence=None
-    ).fit(pd.DataFrame(index=idx), y)
-    assert regressor.fitted is True
-    assert regressor.order[1] == 1
-
-    spec = regressor.to_surrogate_spec()
-    assert "drift" in spec.data["coefficients"]
-    assert isinstance(spec.data["coefficients"]["drift"], float)
-
-
-@pytest.mark.unit
 def test_d1_default_mean_uses_constant_drift_for_pyomo_contract():
     """The d=1 default deterministic term matches ArimaSurrogate's drift."""
     pytest.importorskip("scipy")
@@ -911,6 +814,25 @@ def test_auto_arima_d_in_zero_or_one():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("key", ["seasonal", "ic"])
+def test_auto_kwargs_reject_keywords_the_class_sets(key):
+    """The search is always non-seasonal and AIC-ranked, so these are refused."""
+    with pytest.raises(FlexConfigError, match=rf"\['{key}'\].*drop them"):
+        ArimaRegressor(auto=True, **{key: True})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"include_drift": True}, {"seasonal_order": (0, 0, 0, 24)}, {"max_p": 3}],
+)
+def test_extra_keywords_require_auto(kwargs):
+    """Without auto=True, extra keywords (or removed options) are refused."""
+    with pytest.raises(FlexConfigError, match="only apply with auto=True"):
+        ArimaRegressor(order=(1, 1, 0), **kwargs)
+
+
+@pytest.mark.unit
 def test_auto_arima_d_greater_than_one_raises(monkeypatch):
     """auto=True with a search that selects d>1 raises FlexConfigError."""
     pytest.importorskip("scipy")
@@ -925,7 +847,7 @@ def test_auto_arima_d_greater_than_one_raises(monkeypatch):
     original = arima_module.auto_select_order
 
     def _fake_auto(*_args, **_kwargs):
-        return (1, 2, 1), None
+        return (1, 2, 1)
 
     monkeypatch.setattr(arima_module, "auto_select_order", _fake_auto)
     try:
@@ -1135,7 +1057,6 @@ def test_fits_arima_d1_no_exog():
     sm_insample = regressor.model.predict(
         steps=20,
         start=n - 20,
-        dynamic=True,
     )
     assert len(sm_insample) == 20
     assert not np.any(np.isnan(sm_insample))
@@ -1272,32 +1193,6 @@ def test_sufficiently_sized_order_still_fits():
         pd.DataFrame(index=idx), y
     )
     assert regressor.fitted is True
-
-
-# -- predict(dynamic=False) (M4) -----------------------------------------------
-
-
-@pytest.mark.unit
-def test_predict_dynamic_false_raises():
-    """dynamic=False is documented as unsupported and must raise loudly,
-    not silently fall back to dynamic=True's behaviour (the parameter was
-    previously read from the signature but never actually used).
-    """
-    pytest.importorskip("scipy")
-
-    rng = np.random.default_rng(0)
-    n = 60
-    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
-    y_values = np.zeros(n)
-    for t in range(1, n):
-        y_values[t] = 0.5 * y_values[t - 1] + rng.normal(0, 0.05)
-    y = pd.DataFrame({"y": y_values}, index=idx)
-
-    regressor = ArimaRegressor(order=(1, 0, 0), max_ar_persistence=None).fit(
-        pd.DataFrame(index=idx), y
-    )
-    with pytest.raises(FlexConfigError, match="dynamic"):
-        regressor.model.predict(steps=3, dynamic=False)
 
 
 # -- FlexConfigError paths that were not previously exercised ------------------

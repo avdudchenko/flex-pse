@@ -416,7 +416,7 @@ class DirectResults:
             commits when it simulates forward.
 
     Note:
-        ``llf``, ``aic``, ``bic``, ``aicc``, ``sigma2``, and ``rmse`` exclude
+        ``llf``, ``aic``, ``bic``, ``sigma2``, and ``rmse`` exclude
         the zero padding, so they are not comparable to statsmodels.
     """
 
@@ -489,35 +489,11 @@ class DirectResults:
             return np.inf
         return -2.0 * self.llf + (self.terms.n_params + 1) * np.log(self.nobs_effective)
 
-    @property
-    def aicc(self) -> float | None:
-        """Small-sample corrected AIC, or ``None`` when it is undefined.
-
-        The correction ``2k(k+1) / (n - k - 1)`` is undefined once ``n``
-        drops to ``k + 1``. AICc is only reported, never used by the fit, so
-        this logs a warning instead of raising.
-        """
-        k = self.terms.n_params + 1
-        denominator = self.nobs_effective - k - 1
-        if denominator <= 0:
-            _log.warning(
-                "AICc is undefined for this fit: %d effective observation(s) "
-                "against %d parameter(s) leaves a correction denominator of "
-                "%d. Reporting AICc as None; use AIC or BIC, or fit a lower "
-                "order on more data.",
-                self.nobs_effective,
-                k,
-                denominator,
-            )
-            return None
-        return float(self.aic) + (2.0 * k * (k + 1)) / denominator
-
     def predict(
         self,
         steps: int = 1,
         exog: np.ndarray | None = None,
         start: int | None = None,
-        dynamic: bool = True,
     ) -> np.ndarray:
         """Recursive multi-step forecast with future innovations at zero.
 
@@ -532,25 +508,14 @@ class DirectResults:
             start: Level row of the training data to start an in-sample
                 free run from, using the data before it as history. ``None``
                 forecasts on from the end of the training data.
-            dynamic: Must be ``True``; one-step prediction from actual lags
-                is not implemented.
 
         Returns:
             ``steps`` forecasts on the level scale of ``y``.
 
         Raises:
-            FlexConfigError: If ``dynamic=False`` is passed.
             FlexDataError: If ``start`` leaves fewer than ``max(p + d, q)``
                 rows of history.
         """
-        if not dynamic:
-            raise FlexConfigError(
-                "ArimaRegressor's direct-fit predict() only implements "
-                "dynamic=True (recursive) prediction; one-step-ahead "
-                "dynamic=False prediction is not implemented. Use "
-                "`fittedvalues_level` for in-sample one-step-ahead values, or "
-                "omit `dynamic` (it defaults to True)."
-            )
         start = len(self.eta) if start is None else start
         if start < self.terms.seed:
             raise FlexDataError(
@@ -943,27 +908,21 @@ def auto_select_order(
     y: np.ndarray,
     x: np.ndarray | None,
     *,
-    seasonal: bool,
-    stationary: bool,
     auto_kwargs: dict[str, object],
-) -> tuple[tuple[int, int, int], tuple[int, int, int, int] | None]:
-    """Select an order with statsforecast ``AutoARIMA``.
+) -> tuple[int, int, int]:
+    """Select a non-seasonal order with statsforecast ``AutoARIMA``.
 
-    Seasonal differencing ``D`` defaults to 0, since the backend cannot fit
-    it. The caller validates ``d`` and the seasonal terms, and refits the
-    returned order with :func:`fit_direct`.
+    The caller validates ``d`` and refits the returned order with
+    :func:`fit_direct`.
 
     Args:
         y: Output series.
         x: Exogenous matrix, or ``None``.
-        seasonal: Whether to include seasonal terms in the search.
-        stationary: If ``True``, restrict the search to stationary models.
         auto_kwargs: Extra keyword arguments forwarded to ``AutoARIMA``
-            (e.g. ``max_p``, ``max_q``, ``season_length``).
+            (e.g. ``max_p``, ``max_q``, ``stationary``).
 
     Returns:
-        ``(order, seasonal_order)``, with ``seasonal_order`` ``None`` when
-        the selected model has no seasonal AR/MA terms.
+        The selected ``(p, d, q)``.
 
     Raises:
         FlexConfigError: If statsforecast is not installed.
@@ -976,10 +935,8 @@ def auto_select_order(
             "selection. Install it with `pip install 'flex-pse[parameterize]'`."
         ) from exc
 
-    kwargs = {"D": 0, **({"stationary": True} if stationary else {}), **auto_kwargs}
     with warnings.catch_warnings():
         _ignore_auto_arima_search_warnings()
-        fitted = AutoARIMA(seasonal=seasonal, ic="aic", **kwargs).fit(y, X=x)
-    p, q, P, Q, m, d, _D = (int(value) for value in fitted.model_["arma"])
-    seasonal_order = None if P == 0 and Q == 0 else (P, 0, Q, m)
-    return (p, d, q), seasonal_order
+        fitted = AutoARIMA(seasonal=False, ic="aic", **auto_kwargs).fit(y, X=x)
+    p, q, _P, _Q, _m, d, _D = (int(value) for value in fitted.model_["arma"])
+    return p, d, q

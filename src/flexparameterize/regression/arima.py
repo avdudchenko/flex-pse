@@ -13,9 +13,8 @@ and forecasting machinery lives in
 direct least-squares backend, which minimizes the exact residual the Pyomo
 surrogate implements.
 
-**Restriction**: ``d`` may be ``0`` or ``1``; seasonal differencing (``D``)
-must be ``0``, and seasonal AR/MA terms (``P>0`` or ``Q>0``) are not
-supported. The Pyomo surrogate implements the mean ARIMA equation in closed
+**Restriction**: ``d`` may be ``0`` or ``1``, and the model is
+non-seasonal. The Pyomo surrogate implements the mean ARIMA equation in closed
 form, which supports at most a single order of differencing.
 
 Typical usage::
@@ -92,11 +91,8 @@ class ArimaRegressor:
     order with the direct least-squares backend.
 
     **Restriction**: ``d`` may be ``0`` or ``1`` (the Pyomo surrogate's mean
-    ARIMA equation supports at most a single order of differencing).
-    Seasonal differencing (``D``) must be ``0``, and seasonal AR/MA terms
-    (``P>0`` or ``Q>0``) are not supported at all — only a plain,
-    non-seasonal ARIMA (``seasonal_order=None`` or the trivial
-    ``(0, 0, 0, m)``) can be fit.
+    ARIMA equation supports at most a single order of differencing), and
+    the model is non-seasonal.
 
     **Fitting backend**: ``scipy.optimize.least_squares`` minimizes the
     mean-equation residual directly. This is the exact objective the Pyomo
@@ -113,31 +109,19 @@ class ArimaRegressor:
     Args:
         order: ``(p, d, q)`` ARIMA order; required when ``auto`` is ``False``.
             Must satisfy ``d in (0, 1)``.
-        seasonal_order: ``(P, D, Q, m)`` seasonal order; pass ``None`` (the
-            default) for a plain (non-seasonal) ARIMA.  If provided, must
-            satisfy ``D == 0`` and ``P == Q == 0``, so only the trivial
-            ``(0, 0, 0, m)`` (equivalent to ``None``) is accepted.
         include_mean: Whether to include the model's deterministic term.
             This is a level intercept for ``d=0`` and constant drift for
             ``d=1``. Default ``True``.
-        include_drift: Whether to include a drift term (constant in the
-            differenced series). Default ``False``. For ``d=1`` this is an
-            explicit alias for the default ``include_mean`` deterministic
-            term; setting it with ``d=0`` raises ``FlexConfigError``.
         auto: If ``True``, run ``statsforecast.models.AutoARIMA`` to
             discover the best order, then refit that order with the direct
-            backend for Pyomo compatibility.  AutoARIMA may select ``d=0``
-            or ``d=1``; ``D`` is always forced to 0.  Use ``auto_kwargs`` to
-            restrict the search (e.g. ``max_d=1``).
+            backend for Pyomo compatibility.  The search is non-seasonal
+            and may select ``d=0`` or ``d=1``.  Use ``auto_kwargs`` to
+            restrict it (e.g. ``max_d=1``, ``stationary=True``).
         max_ar_persistence: Bounds every AR coefficient to
             ``[-max_ar_persistence, max_ar_persistence]`` during the fit
             itself (via bounded least squares). Default ``0.85``. Set to
             ``None`` to leave the coefficients unbounded; the stationarity
             check still applies.
-        stationary: If ``True``, force ``stationary=True`` in
-            ``statsforecast.models.AutoARIMA``, which restricts the
-            search to models with stationary AR coefficients.  Default
-            ``False``.
         fit_objective: ``"equation_error"`` (default) minimizes one-step
             residuals using actual lagged values. ``"output_error"`` then
             refines that fit against windowed free-run error, the error the
@@ -151,14 +135,12 @@ class ArimaRegressor:
             behind an ``output_error`` fit. ``"ipopt"`` minimizes the free
             run through the real ``ArimaSurrogate`` over the whole series.
         **auto_kwargs: Extra keyword arguments forwarded to ``AutoARIMA``
-            (e.g. ``max_p``, ``max_q``, ``season_length``). ``D`` defaults
-            to 0; pass ``max_d=1`` to allow differencing.
+            (e.g. ``max_p``, ``max_q``, ``max_d``, ``stationary``), except
+            ``seasonal`` and ``ic``, which this class sets.
 
     Raises:
-        FlexConfigError: If ``d > 1``, ``D > 0``, or a seasonal AR/MA order
-            (``P > 0`` or ``Q > 0``) is requested; if ``include_drift=True``
-            is combined with anything other than an explicit ``d=1`` order
-            (including ``auto=True``, where no order is known yet); if
+        FlexConfigError: If ``d > 1``; if ``auto_kwargs`` is given without
+            ``auto=True``, or sets ``seasonal`` or ``ic``; if
             ``max_ar_persistence`` is not a number in ``(0, 1]`` or ``None``;
             or if ``fit_objective``, ``forecast_horizon``, or ``fit_solver``
             is invalid or combined with an option it does not apply to.
@@ -167,25 +149,14 @@ class ArimaRegressor:
     def __init__(
         self,
         order: tuple[int, int, int] | None = None,
-        seasonal_order: tuple[int, int, int, int] | None = None,
         include_mean: bool = True,
-        include_drift: bool = False,
         auto: bool = False,
         max_ar_persistence: float | None = 0.85,
-        stationary: bool = False,
         fit_objective: str = "equation_error",
         forecast_horizon: int | str = "auto",
         fit_solver: str = "scipy",
         **auto_kwargs: object,
     ) -> None:
-        if include_drift and (order is None or order[1] != 1):
-            raise FlexConfigError(
-                "ArimaRegressor only supports include_drift=True when d=1. "
-                f"Got include_drift=True with order={order}. "
-                "Set include_drift=False or use order=(p, 1, q).",
-                field="include_drift",
-                value=True,
-            )
         if order is not None and order[1] != 0:
             if order[1] != 1:
                 raise FlexConfigError(
@@ -195,25 +166,6 @@ class ArimaRegressor:
                     field="order",
                     value=order,
                 )
-        if seasonal_order is not None and seasonal_order[1] != 0:
-            raise FlexConfigError(
-                f"ArimaRegressor only supports non-differenced seasonal models "
-                f"(D=0). Got seasonal_order={seasonal_order} with "
-                f"D={seasonal_order[1]}. Use seasonal_order=(P, 0, Q, m) instead.",
-                field="seasonal_order",
-                value=seasonal_order,
-            )
-        if seasonal_order is not None and (
-            seasonal_order[0] != 0 or seasonal_order[2] != 0
-        ):
-            raise FlexConfigError(
-                f"ArimaRegressor's direct-fit backend does not support seasonal "
-                f"AR/MA terms (P>0 or Q>0). Got seasonal_order={seasonal_order} "
-                f"with P={seasonal_order[0]}, Q={seasonal_order[2]}. Use "
-                f"seasonal_order=(0, 0, 0, m) or None instead.",
-                field="seasonal_order",
-                value=seasonal_order,
-            )
         if max_ar_persistence is not None and (
             not isinstance(max_ar_persistence, (int, float))
             or max_ar_persistence <= 0
@@ -277,6 +229,22 @@ class ArimaRegressor:
                 field="forecast_horizon",
                 value=forecast_horizon,
             )
+        if auto_kwargs and not auto:
+            raise FlexConfigError(
+                f"ArimaRegressor got unexpected keyword argument(s) "
+                f"{sorted(auto_kwargs)}. Extra keywords are forwarded to "
+                "AutoARIMA, so they only apply with auto=True.",
+                field="auto_kwargs",
+                value=sorted(auto_kwargs),
+            )
+        reserved = sorted(set(auto_kwargs) & {"seasonal", "ic"})
+        if reserved:
+            raise FlexConfigError(
+                f"ArimaRegressor sets AutoARIMA's {reserved} itself (the search "
+                "is non-seasonal and ranks by AIC); drop them from auto_kwargs.",
+                field="auto_kwargs",
+                value=reserved,
+            )
         if not auto and order is None:
             raise FlexConfigError(
                 "ArimaRegressor.fit requires either `order=(p,d,q)` or "
@@ -291,13 +259,10 @@ class ArimaRegressor:
         )
         self._forecast_horizon = self._requested_horizon
         self._order = order
-        self._seasonal_order = seasonal_order
         self._include_mean = include_mean
-        self._include_drift = include_drift
         self._auto = auto
         self._auto_kwargs: dict[str, object] = auto_kwargs
         self._max_ar_persistence = max_ar_persistence
-        self._stationary = stationary
 
         self.model = None
         self.n_samples: int = 0
@@ -444,7 +409,7 @@ class ArimaRegressor:
             q=q,
             n_exog=n_exog,
             has_const=self._include_mean and d == 0,
-            has_drift=d == 1 and (self._include_mean or self._include_drift),
+            has_drift=d == 1 and self._include_mean,
         )
         refine = None
         if self._fit_solver == "ipopt":
@@ -471,8 +436,6 @@ class ArimaRegressor:
             refine=refine,
         )
         self._fitted = True
-        # Only the trivial seasonal order can be fit, so none survives it.
-        self._seasonal_order = None
         self._check_stability()
 
         self.metrics = {
@@ -493,27 +456,9 @@ class ArimaRegressor:
             The selected ``(p, d, q)``.
 
         Raises:
-            FlexConfigError: If AutoARIMA selects seasonal AR/MA terms or
-                ``d > 1``.
+            FlexConfigError: If AutoARIMA selects ``d > 1``.
         """
-        order, seasonal_order = auto_select_order(
-            y_values,
-            x_values,
-            seasonal=self._seasonal_order is not None,
-            stationary=self._stationary,
-            auto_kwargs=self._auto_kwargs,
-        )
-        if seasonal_order is not None:
-            raise FlexConfigError(
-                f"ArimaRegressor auto=True selected a seasonal order "
-                f"with P>0 or Q>0 ({seasonal_order}), which the "
-                f"direct-fit backend does not support. Retry with "
-                f"seasonal_order=None (the default, which also skips "
-                f"the seasonal search) or restrict the search via "
-                f"auto_kwargs (e.g. max_P=0, max_Q=0).",
-                field="seasonal_order",
-                value=seasonal_order,
-            )
+        order = auto_select_order(y_values, x_values, auto_kwargs=self._auto_kwargs)
         if order[1] > 1:
             raise FlexConfigError(
                 f"ArimaRegressor auto=True selected d={order[1]}, but the "
@@ -594,11 +539,6 @@ class ArimaRegressor:
     def order(self) -> tuple[int, int, int] | None:
         """The fitted ``(p, d, q)`` order, or ``None`` before :meth:`fit`."""
         return self._order
-
-    @property
-    def seasonal_order(self) -> tuple[int, int, int, int] | None:
-        """The requested seasonal order; ``None`` once fitted."""
-        return self._seasonal_order
 
     @property
     def fit_objective(self) -> str:
@@ -716,7 +656,7 @@ class ArimaRegressor:
             },
         )
 
-    def fit_diagnostics(self) -> dict[str, float | None]:
+    def fit_diagnostics(self) -> dict[str, float]:
         """Return extended fit statistics.
 
         All of them exclude the zero-padded leading lags, so ``n_samples``
@@ -726,8 +666,7 @@ class ArimaRegressor:
         fitted MA block is invertible.
 
         Returns:
-            Mapping of diagnostic name to value. ``aicc`` is ``None`` when
-            too few effective observations remain to define it.
+            Mapping of diagnostic name to value.
 
         Raises:
             FlexDataError: If :meth:`fit` has not been called.
@@ -737,7 +676,6 @@ class ArimaRegressor:
         return {
             "aic": float(m.aic),
             "bic": float(m.bic),
-            "aicc": m.aicc,
             "log_likelihood": float(m.llf),
             "n_parameters": float(m.terms.n_params),
             "n_samples": float(m.nobs_effective),

@@ -113,7 +113,6 @@ def test_pyomo_matches_direct_fit_for_multiple_arima_orders():
                 steps=n_insample + n_fcst,
                 exog=all_exog,
                 start=n_train - n_insample,
-                dynamic=True,
             )
         )
         direct_fcst = direct_all[n_insample:]
@@ -336,7 +335,6 @@ def test_arima_roundtrip(order, auto, auto_kwargs):
             steps=n_insample + n_fcst,
             exog=all_exog,
             start=n_train - n_insample,
-            dynamic=True,
         )
     )
     direct_insample = sm_all[:n_insample]
@@ -478,7 +476,6 @@ def test_arima_roundtrip_d1_at_offset_zero():
             steps=n_insample - seed_count,
             exog=insample_exog,
             start=seed_count,
-            dynamic=True,
         )
     )
     sm_fcst = np.asarray(
@@ -486,7 +483,6 @@ def test_arima_roundtrip_d1_at_offset_zero():
             steps=(n_insample - seed_count) + n_fcst,
             exog=all_exog,
             start=seed_count,
-            dynamic=True,
         )
     )
     direct_fcst = sm_fcst[-n_fcst:]
@@ -597,9 +593,7 @@ def test_arima_roundtrip_d1_with_drift():
     y = pd.DataFrame({"biogas": y_values}, index=idx)
     X = pd.DataFrame({"feed": feed})
 
-    regressor = ArimaRegressor(
-        order=(1, 1, 0), include_drift=True, max_ar_persistence=None
-    ).fit(
+    regressor = ArimaRegressor(order=(1, 1, 0), max_ar_persistence=None).fit(
         X,
         y,
         input_units={"feed": "dimensionless"},
@@ -619,7 +613,6 @@ def test_arima_roundtrip_d1_with_drift():
             steps=n_insample + n_fcst,
             exog=all_exog,
             start=n_train - n_insample,
-            dynamic=True,
         )
     )
     direct_insample = sm_all[:n_insample]
