@@ -21,6 +21,7 @@ by an :class:`ArimaTerms`. Two fitting criteria are supported:
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from types import MethodType
 
@@ -117,13 +118,15 @@ class ArimaTerms:
             exog_names: Exogenous column names, in fitted order.
 
         Returns:
-            ``const``/``drift`` (when present), ``ar1..``, ``ma1..``, then
-            the exogenous column names.
+            ``intercept``/``drift`` (when present), ``ar.L1..``, ``ma.L1..``,
+            then ``exog.<column>``: the names
+            :class:`~flexops.surrogates.arima.ArimaSurrogate` registers its
+            coefficient Vars under.
         """
-        names = ["const"] if self.has_const else ["drift"] if self.has_drift else []
-        names += [f"ar{j}" for j in range(1, self.p + 1)]
-        names += [f"ma{j}" for j in range(1, self.q + 1)]
-        return names + list(exog_names)
+        names = ["intercept"] if self.has_const else ["drift"] if self.has_drift else []
+        names += [f"ar.L{j}" for j in range(1, self.p + 1)]
+        names += [f"ma.L{j}" for j in range(1, self.q + 1)]
+        return names + [f"exog.{name}" for name in exog_names]
 
 
 def auto_forecast_horizon(n_rows: int, terms: ArimaTerms) -> int:
@@ -906,6 +909,36 @@ def fit_output_error_ipopt(
     )
 
 
+def _ignore_auto_arima_search_warnings() -> None:
+    """Silence the expected noise from statsforecast's order search.
+
+    Call inside ``warnings.catch_warnings()``. AutoARIMA's unit-root tests
+    call statsmodels ``kpss``, which warns about its tuple return layout
+    and about statistics beyond its p-value table; its candidate fits run
+    scipy BFGS, which warns when a line search stalls on a poor candidate.
+    None affects the selected order, which :func:`fit_direct` then refits.
+    Other warnings, including any from that refit, stay visible.
+    """
+    warnings.filterwarnings(
+        "ignore", message="kpss currently returns", category=FutureWarning
+    )
+    try:
+        from statsmodels.tools.sm_exceptions import InterpolationWarning
+    except ImportError:
+        pass
+    else:
+        warnings.filterwarnings("ignore", category=InterpolationWarning)
+    # scipy does not export LineSearchWarning (a RuntimeWarning) publicly.
+    warnings.filterwarnings(
+        "ignore",
+        message=(
+            "(The line search algorithm did not converge"
+            "|Rounding errors prevent the line search from converging)"
+        ),
+        category=RuntimeWarning,
+    )
+
+
 def auto_select_order(
     y: np.ndarray,
     x: np.ndarray | None,
@@ -944,7 +977,9 @@ def auto_select_order(
         ) from exc
 
     kwargs = {"D": 0, **({"stationary": True} if stationary else {}), **auto_kwargs}
-    fitted = AutoARIMA(seasonal=seasonal, ic="aic", **kwargs).fit(y, X=x)
+    with warnings.catch_warnings():
+        _ignore_auto_arima_search_warnings()
+        fitted = AutoARIMA(seasonal=seasonal, ic="aic", **kwargs).fit(y, X=x)
     p, q, P, Q, m, d, _D = (int(value) for value in fitted.model_["arma"])
     seasonal_order = None if P == 0 and Q == 0 else (P, 0, Q, m)
     return (p, d, q), seasonal_order

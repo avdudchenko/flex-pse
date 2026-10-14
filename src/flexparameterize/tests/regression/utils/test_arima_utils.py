@@ -7,6 +7,8 @@ rather than as a drifted fit downstream.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -14,6 +16,7 @@ from flexparameterize.regression.utils.arima_utils import (
     AUTO_MAX_HORIZON,
     ArimaTerms,
     DirectResults,
+    _ignore_auto_arima_search_warnings,
     ar_max_root,
     auto_forecast_horizon,
     coefficient_bounds,
@@ -91,7 +94,13 @@ def test_terms_unpack_and_name_the_parameter_vector():
     assert (c, list(ar), list(ma), list(beta)) == (0.1, [0.5, -0.2], [0.3], [2.0])
     assert terms.n_params == 5
     assert terms.seed == 3
-    assert terms.param_names(["feed"]) == ["drift", "ar1", "ar2", "ma1", "feed"]
+    assert terms.param_names(["feed"]) == [
+        "drift",
+        "ar.L1",
+        "ar.L2",
+        "ma.L1",
+        "exog.feed",
+    ]
 
 
 @pytest.mark.unit
@@ -287,3 +296,30 @@ def test_surrogate_coefficients_name_the_deterministic_term_by_order():
         "order": [1, 0, 0],
         "ar_coefs": [0.5],
     }
+
+
+@pytest.mark.unit
+def test_auto_arima_search_filter_silences_only_known_noise():
+    """The search filter drops statsforecast's known noise and nothing else."""
+    sm_exceptions = pytest.importorskip("statsmodels.tools.sm_exceptions")
+
+    emitted = [
+        ("kpss currently returns a plain tuple", FutureWarning),
+        ("statistic outside table", sm_exceptions.InterpolationWarning),
+        ("The line search algorithm did not converge", RuntimeWarning),
+        ("Rounding errors prevent the line search from converging", RuntimeWarning),
+        ("some other future change", FutureWarning),
+        ("overflow encountered in exp", RuntimeWarning),
+        ("a genuine user warning", UserWarning),
+    ]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _ignore_auto_arima_search_warnings()
+        for message, category in emitted:
+            warnings.warn(message, category, stacklevel=1)
+
+    assert [str(w.message) for w in caught] == [
+        "some other future change",
+        "overflow encountered in exp",
+        "a genuine user warning",
+    ]

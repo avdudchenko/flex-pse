@@ -260,7 +260,9 @@ def test_reswapping_arima_relation_succeeds_and_uses_latest_coefficients():
     assert result.solver.termination_condition == pyo.TerminationCondition.optimal
 
     coef2 = regressor2.coefficients
-    expected_y1 = coef2.get("const", 0.0) + coef2["ar1"] * float(m.unit.y[0].value)
+    expected_y1 = coef2.get("intercept", 0.0) + coef2["ar.L1"] * float(
+        m.unit.y[0].value
+    )
     assert float(m.unit.y[1].value) == pytest.approx(expected_y1, rel=1e-4)
 
 
@@ -604,7 +606,7 @@ def test_arima_roundtrip_d1_with_drift():
         output_units="m^3/hr",
     )
     assert regressor.fitted is True
-    assert "drift" in regressor.model_["coef"]
+    assert "drift" in regressor.coefficients
 
     spec = regressor.to_surrogate_spec()
     assert "drift" in spec.data["coefficients"]

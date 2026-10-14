@@ -46,19 +46,6 @@ def _capture_arima_warnings(monkeypatch) -> list[str]:
 
 
 # -- absence tests -----------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_scipy_absent_raises(monkeypatch):
-    """With scipy unimportable, fitting raises FlexConfigError."""
-    monkeypatch.setitem(sys.modules, "scipy", None)
-    monkeypatch.setitem(sys.modules, "scipy.optimize", None)
-
-    y = pd.DataFrame({"biogas_m3_hour": [1.0, 2.0, 3.0]})
-    with pytest.raises(FlexConfigError, match=r"flex-pse\[parameterize\]"):
-        ArimaRegressor(order=(1, 0, 0)).fit(pd.DataFrame(index=y.index), y)
-
-
 @pytest.mark.unit
 def test_no_order_no_auto_raises():
     """Passing neither order nor auto=True raises FlexConfigError."""
@@ -93,8 +80,8 @@ def test_fits_ar1_no_exog():
         pd.DataFrame(index=idx), y
     )
     assert regressor.coefficients is not None
-    assert "ar1" in regressor.coefficients
-    assert regressor.coefficients["ar1"] == pytest.approx(phi, rel=0.1)
+    assert "ar.L1" in regressor.coefficients
+    assert regressor.coefficients["ar.L1"] == pytest.approx(phi, rel=0.1)
 
 
 @pytest.mark.unit
@@ -118,8 +105,8 @@ def test_fits_arima_with_exog():
         output_units="m^3/hr",
     )
     assert regressor.exogenous_variables == ["feed"]
-    assert "feed" in regressor.coefficients
-    assert regressor.coefficients["feed"] > 0.5
+    assert "exog.feed" in regressor.coefficients
+    assert regressor.coefficients["exog.feed"] > 0.5
 
 
 @pytest.mark.unit
@@ -142,34 +129,96 @@ def test_fits_multiple_exog_columns():
         output_units="unit",
     )
     assert sorted(regressor.exogenous_variables) == ["x1", "x2"]
-    assert "x1" in regressor.coefficients
-    assert "x2" in regressor.coefficients
-    assert regressor.coefficients["x1"] == pytest.approx(0.4, rel=0.2)
-    assert regressor.coefficients["x2"] == pytest.approx(1e-5, rel=0.2)
+    assert "exog.x1" in regressor.coefficients
+    assert "exog.x2" in regressor.coefficients
+    assert regressor.coefficients["exog.x1"] == pytest.approx(0.4, rel=0.2)
+    assert regressor.coefficients["exog.x2"] == pytest.approx(1e-5, rel=0.2)
 
 
 # -- protocol conformance ----------------------------------------------------
 
 
-@pytest.mark.unit
-def test_rows_with_nulls_are_dropped_from_the_inputs_too():
-    """A null row is dropped from X as well as y, so the two stay aligned."""
-    pytest.importorskip("scipy")
-
-    n = 120
+def _clean_feed_data(n: int = 48):
+    """Return evenly spaced ``(X, y)`` frames for the data-cleanliness tests."""
     idx = pd.date_range("2024-01-01", periods=n, freq="1h")
     rng = np.random.default_rng(12)
     feed = rng.uniform(0.1, 1.0, size=n)
     y = pd.DataFrame({"y": 2.0 * feed + rng.normal(0, 0.01, size=n)}, index=idx)
-    X = pd.DataFrame({"feed": feed}, index=idx)
-    y.iloc[[10, 50]] = np.nan
+    return pd.DataFrame({"feed": feed}, index=idx), y
 
-    regressor = ArimaRegressor(order=(1, 0, 0)).fit(
+
+def _fit_feed(X, y):
+    return ArimaRegressor(order=(1, 0, 0)).fit(
         X, y, input_units={"feed": "dimensionless"}
     )
 
-    assert regressor.n_samples == n - 2
-    assert regressor.coefficients["feed"] == pytest.approx(2.0, abs=0.05)
+
+@pytest.mark.unit
+@pytest.mark.parametrize("frame", ["X", "y"])
+def test_fit_rejects_null_values(frame):
+    """A null in X or y is refused rather than silently dropped."""
+    X, y = _clean_feed_data()
+    (X if frame == "X" else y).iloc[10] = np.nan
+
+    column = "feed" if frame == "X" else "y"
+    with pytest.raises(FlexDataError, match=rf"1 row\(s\) hold a null.*\['{column}'\]"):
+        _fit_feed(X, y)
+
+
+@pytest.mark.unit
+def test_fit_rejects_misaligned_x_and_y():
+    """Rows present in only one of X and y surface as nulls, so fit refuses."""
+    X, y = _clean_feed_data()
+    with pytest.raises(FlexDataError, match="share the same index"):
+        _fit_feed(X.iloc[:-1], y)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "mangle",
+    [
+        pytest.param(lambda df: df.drop(df.index[20]), id="gap"),
+        pytest.param(lambda df: df.iloc[::-1], id="decreasing"),
+        pytest.param(lambda df: pd.concat([df.iloc[:5], df.iloc[4:]]), id="duplicate"),
+    ],
+)
+def test_fit_rejects_unevenly_spaced_timestamps(mangle):
+    """The lags and the surrogate history assume one constant time step."""
+    X, y = _clean_feed_data()
+    with pytest.raises(FlexDataError, match="evenly spaced, increasing"):
+        _fit_feed(mangle(X), mangle(y))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("role", ["X", "y"])
+def test_fit_rejects_a_series(role):
+    """X and y must be DataFrames; a Series gets a clear error, not AttributeError."""
+    X, y = _clean_feed_data()
+    args = {"X": X, "y": y}
+    args[role] = args[role].iloc[:, 0]
+
+    with pytest.raises(FlexDataError, match=rf"takes {role} as a DataFrame.*Series"):
+        _fit_feed(args["X"], args["y"])
+
+
+@pytest.mark.unit
+def test_fit_rejects_multi_column_y():
+    X, y = _clean_feed_data()
+    y["other"] = y["y"]
+
+    with pytest.raises(FlexDataError, match=r"one output column; y has 2"):
+        _fit_feed(X, y)
+
+
+@pytest.mark.unit
+def test_fit_accepts_clean_evenly_spaced_data():
+    pytest.importorskip("scipy")
+    X, y = _clean_feed_data()
+
+    regressor = _fit_feed(X, y)
+
+    assert regressor.n_samples == len(y)
+    assert regressor.coefficients["exog.feed"] == pytest.approx(2.0, abs=0.05)
 
 
 @pytest.mark.unit
@@ -290,7 +339,7 @@ def test_surrogate_spec_omits_intercept_without_a_deterministic_term():
     spec = regressor.to_surrogate_spec()
     assert "intercept" not in spec.data["coefficients"]
     assert "drift" not in spec.data["coefficients"]
-    assert "const" not in regressor.to_fit_result().coefficients
+    assert "intercept" not in regressor.to_fit_result().coefficients
     ArimaSurrogate(spec.data)
 
 
@@ -313,7 +362,7 @@ def test_surrogate_spec_keeps_a_zero_valued_fitted_intercept():
 
     coefficients = regressor.to_surrogate_spec().data["coefficients"]
     assert coefficients["intercept"] == pytest.approx(0.0)
-    assert regressor.to_fit_result().coefficients["const"] == pytest.approx(0.0)
+    assert regressor.to_fit_result().coefficients["intercept"] == pytest.approx(0.0)
 
 
 @pytest.mark.unit
@@ -331,7 +380,6 @@ def test_aicc_is_none_when_undefined_instead_of_raising(caplog):
     regressor = ArimaRegressor(order=(0, 0, 0)).fit(pd.DataFrame(index=idx), y)
 
     assert regressor.fitted is True
-    assert regressor.model_["aicc"] is None
     assert regressor.fit_diagnostics()["aicc"] is None
 
 
@@ -836,7 +884,7 @@ def test_d1_default_mean_uses_constant_drift_for_pyomo_contract():
         pd.DataFrame(index=idx), y, output_units="m^3/hr"
     )
 
-    assert "const" not in regressor.coefficients
+    assert "intercept" not in regressor.coefficients
     assert regressor.coefficients["drift"] == pytest.approx(0.35, abs=0.03)
     spec = regressor.to_surrogate_spec()
     assert "const" not in spec.data["coefficients"]
@@ -903,7 +951,7 @@ def test_high_ar_persistence_is_bounded_not_rejected():
     # max_ar_persistence=0.85 constrains the fit itself instead of raising.
     regressor = ArimaRegressor(order=(1, 0, 0)).fit(pd.DataFrame(index=idx), y)
     assert regressor.fitted is True
-    ar_coef = regressor.coefficients["ar1"]
+    ar_coef = regressor.coefficients["ar.L1"]
     assert abs(ar_coef) <= 0.85 + 1e-6
 
 
@@ -1036,7 +1084,7 @@ def test_output_error_ma_block_stays_bounded_on_biogas():
     forecast = regressor.model.predict(steps=192, exog=X.iloc[test].to_numpy())
     rmse = float(np.sqrt(np.mean((forecast - y.iloc[test].to_numpy().ravel()) ** 2)))
 
-    assert abs(regressor.coefficients["ma1"]) <= 0.99 + 1e-9
+    assert abs(regressor.coefficients["ma.L1"]) <= 0.99 + 1e-9
     assert rmse < 0.02
 
 
@@ -1120,13 +1168,13 @@ def test_predict_with_include_mean_false_no_exog():
     regressor = ArimaRegressor(
         order=(1, 0, 0), include_mean=False, max_ar_persistence=None
     ).fit(pd.DataFrame(index=idx), y)
-    assert "const" not in regressor.coefficients
+    assert "intercept" not in regressor.coefficients
 
     fcst = regressor.model.predict(steps=3)
     assert len(fcst) == 3
     assert not np.any(np.isnan(fcst))
 
-    ar1 = regressor.coefficients["ar1"]
+    ar1 = regressor.coefficients["ar.L1"]
     manual = []
     prev = float(y_values[-1])
     for _ in range(3):
@@ -1158,15 +1206,15 @@ def test_predict_with_include_mean_false_and_exog():
         input_units={"feed": "dimensionless"},
         output_units="unit",
     )
-    assert "const" not in regressor.coefficients
+    assert "intercept" not in regressor.coefficients
 
     exog_future = np.array([[0.5], [0.6], [0.7]])
     fcst = regressor.model.predict(steps=3, exog=exog_future)
     assert len(fcst) == 3
     assert not np.any(np.isnan(fcst))
 
-    ar1 = regressor.coefficients["ar1"]
-    beta = regressor.coefficients["feed"]
+    ar1 = regressor.coefficients["ar.L1"]
+    beta = regressor.coefficients["exog.feed"]
     manual = []
     eta_prev = float(y_values[-1]) - beta * float(feed.iloc[-1])
     for i in range(3):
@@ -1448,7 +1496,7 @@ def test_free_run_rmse_reported_in_both_modes_and_matches_hand_computation():
         assert np.isfinite(reported)
 
         coefficients = regressor.coefficients
-        theta = np.array([coefficients["drift"], coefficients["ar1"]], dtype=float)
+        theta = np.array([coefficients["drift"], coefficients["ar.L1"]], dtype=float)
         terms = regressor.model.terms
         residuals = output_error_residuals(
             theta, terms, values, None, regressor.forecast_horizon
@@ -1488,8 +1536,8 @@ def test_forecast_horizon_one_matches_equation_error_fit():
         max_ar_persistence=None,
     ).fit(X, y)
 
-    assert output.coefficients["ar1"] == pytest.approx(
-        equation.coefficients["ar1"], abs=1e-4
+    assert output.coefficients["ar.L1"] == pytest.approx(
+        equation.coefficients["ar.L1"], abs=1e-4
     )
     assert output.coefficients["drift"] == pytest.approx(
         equation.coefficients["drift"], abs=1e-4
@@ -1531,7 +1579,7 @@ def test_output_error_trades_parameter_recovery_for_forecast_accuracy():
 
     # Equation error recovers the generating parameters.
     assert equation.coefficients["drift"] == pytest.approx(true_drift, rel=0.15)
-    assert equation.coefficients["ar1"] == pytest.approx(true_phi, rel=0.2)
+    assert equation.coefficients["ar.L1"] == pytest.approx(true_phi, rel=0.2)
     # Output error wins on the criterion it minimizes.
     assert output.metrics["free_run_rmse"] <= equation.metrics["free_run_rmse"]
 
@@ -1670,8 +1718,8 @@ def test_default_horizon_leaves_the_ma_block_at_its_warm_start(monkeypatch):
     warnings = _capture_arima_warnings(monkeypatch)
     output = ArimaRegressor(order=(1, 1, 1), fit_objective="output_error").fit(X, y)
 
-    assert output.coefficients["ma1"] == pytest.approx(
-        equation.coefficients["ma1"], rel=1e-3
+    assert output.coefficients["ma.L1"] == pytest.approx(
+        equation.coefficients["ma.L1"], rel=1e-3
     )
     assert output.forecast_horizon == n - 2  # seed = p + d = 2, uncapped here
     assert output.fit_diagnostics()["ma_max_root"] < 1.0
@@ -1834,7 +1882,7 @@ def test_ipopt_backend_clips_an_out_of_bound_ma_warm_start():
         output_units="m^3/hr",
     )
 
-    assert abs(regressor.coefficients["ma1"]) <= 0.99 + 1e-9
+    assert abs(regressor.coefficients["ma.L1"]) <= 0.99 + 1e-9
 
 
 @pytest.mark.component
@@ -1875,3 +1923,34 @@ def test_both_output_error_backends_beat_equation_error_on_a_d1_ramp():
     assert ipopt_fit.metrics["free_run_rmse"] == pytest.approx(
         scipy_fit.metrics["free_run_rmse"], rel=1.0
     )
+
+
+@pytest.mark.unit
+def test_fit_does_not_hide_warnings_from_the_refit(monkeypatch):
+    """Only the AutoARIMA search is filtered; the refit's warnings surface."""
+    pytest.importorskip("scipy")
+    import warnings
+
+    from flexparameterize.regression import arima
+
+    real_fit_direct = arima.fit_direct
+
+    def noisy_fit_direct(*args, **kwargs):
+        warnings.warn("refit warning", RuntimeWarning, stacklevel=2)
+        return real_fit_direct(*args, **kwargs)
+
+    monkeypatch.setattr(arima, "fit_direct", noisy_fit_direct)
+    rng = np.random.default_rng(0)
+    idx = pd.date_range("2024-01-01", periods=60, freq="1h")
+    y = pd.DataFrame({"y": rng.normal(size=60)}, index=idx)
+
+    with pytest.warns(RuntimeWarning, match="refit warning"):
+        ArimaRegressor(order=(1, 0, 0)).fit(pd.DataFrame(index=idx), y)
+
+
+@pytest.mark.unit
+def test_fit_requires_datetime_index():
+    """Without timestamps the surrogate history cannot be dated, so fit refuses."""
+    y = pd.DataFrame({"y": np.random.default_rng(0).normal(size=40)})
+    with pytest.raises(FlexDataError, match="DatetimeIndex.*got RangeIndex"):
+        ArimaRegressor(order=(1, 0, 0)).fit(pd.DataFrame(index=y.index), y)

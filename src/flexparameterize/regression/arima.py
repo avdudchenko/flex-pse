@@ -41,7 +41,7 @@ Typical usage::
     model: The fitted
         :class:`~flexparameterize.regression.utils.arima_utils.DirectResults`
         (or ``None`` before :meth:`fit`).
-    n_samples: Number of rows the fit used, after dropping nulls.
+    n_samples: Number of rows the fit used.
     metrics: ``{"aic", "rmse", "free_run_rmse"}`` of the fitted model.
     data_window: ``(first, last)`` index value of the rows used.
     exogenous_variables: Column names of the fitted exogenous inputs.
@@ -53,7 +53,6 @@ Typical usage::
 
 from __future__ import annotations
 
-import warnings
 from functools import partial
 
 import pandas as pd
@@ -61,7 +60,11 @@ import pandas as pd
 from flexcore.config.schema import SurrogateSpec, SurrogateType
 from flexcore.exceptions import FlexConfigError, FlexDataError
 from flexcore.logger import get_logger
-from flexparameterize.regression.base import FitResult
+from flexparameterize.regression.base import (
+    FitResult,
+    require_frame,
+    single_column,
+)
 from flexparameterize.regression.utils.arima_utils import (
     ArimaTerms,
     ar_max_root,
@@ -274,7 +277,11 @@ class ArimaRegressor:
                 field="forecast_horizon",
                 value=forecast_horizon,
             )
-
+        if not auto and order is None:
+            raise FlexConfigError(
+                "ArimaRegressor.fit requires either `order=(p,d,q)` or "
+                "`auto=True`. Pass both or set `auto=True`."
+            )
         self._fit_solver = fit_solver
         self._fit_objective = fit_objective
         # What the caller asked for (None for "auto"), and what the latest
@@ -350,13 +357,15 @@ class ArimaRegressor:
         surrogate.  When ``auto=True``, statsforecast ``AutoARIMA`` is used
         for order selection only; the winning order is then refitted.
 
-        Rows with any null value across ``X``/``y`` are dropped before fitting.
+        ``X`` and ``y`` must be clean: no null values, and a shared
+        ``DatetimeIndex`` that strictly increases at one constant step. The
+        fitted lags and the surrogate's dated history both assume that
+        grid, so gaps must be imputed (or the data split) before fitting.
 
         Args:
             X: Zero or more exogenous-input columns. Pass an empty
                 ``DataFrame`` for a pure ARIMA fit.
-            y: One output column (a one-column ``DataFrame`` or a
-                ``Series``).
+            y: A one-column ``DataFrame`` holding the output.
             input_units: Units of every fitted exogenous column, keyed by its
                 column name.  Defaults to ``{}``.  Recorded for
                 :meth:`to_surrogate_spec`.
@@ -373,26 +382,17 @@ class ArimaRegressor:
                 selects an unsupported order; if the fitted AR block is not
                 stationary; or if an ``output_error`` fit's MA block is not
                 invertible.
-            FlexDataError: If ``y`` does not hold exactly one column, if no
-                rows survive dropping nulls, or if fewer than
-                ``max(p, q) + d + k + 1`` rows survive (where ``k`` is the
-                number of fitted parameters), which would leave the fit
-                rank-deficient. With ``auto=True`` only one row is required,
-                because the order is not yet known.
+            FlexDataError: If ``X`` or ``y`` is not a ``DataFrame``; if
+                ``y`` does not hold exactly one column; if
+                ``X`` and ``y`` lack a ``DatetimeIndex``, hold a null value,
+                or are not evenly spaced in time; if there are no rows; or if
+                there are fewer than ``max(p, q) + d + k + 1`` rows (where
+                ``k`` is the number of fitted parameters), which would leave
+                the fit rank-deficient. With ``auto=True`` only one row is
+                required, because the order is not yet known.
         """
-        if not self._auto and self._order is None:
-            raise FlexConfigError(
-                "ArimaRegressor.fit requires either `order=(p,d,q)` or "
-                "`auto=True`. Pass both or set `auto=True`."
-            )
-        try:
-            import scipy.optimize  # noqa: F401
-        except ImportError as exc:
-            raise FlexConfigError(
-                "ArimaRegressor requires scipy. Install it with "
-                "`pip install 'flex-pse[parameterize]'`."
-            ) from exc
-
+        require_frame(X, regressor="ArimaRegressor", role="X")
+        output = single_column(y, regressor="ArimaRegressor", role="y", what="output")
         input_units = {} if input_units is None else input_units
         missing = [name for name in X.columns if name not in input_units]
         if missing:
@@ -405,17 +405,10 @@ class ArimaRegressor:
         self.input_units = dict(input_units)
         self.output_units = "" if output_units is None else output_units
 
-        output = _single_column(y, "y")
-        exogenous = _exog_columns(X)
-        paired = pd.concat([output.rename("__y__"), exogenous], axis=1).dropna()
-        if paired.empty:
-            raise FlexDataError(
-                "ArimaRegressor has no usable rows after dropping nulls "
-                f"(of {len(output)} rows). Supply non-null data.",
-                field="y",
-            )
+        paired = pd.concat([output.rename("__y__"), X], axis=1)
+        _require_clean_series(paired)
 
-        n_exog = exogenous.shape[1]
+        n_exog = X.shape[1]
         if not self._auto:
             p, d, q = self._order
             k_params = (1 if self._include_mean else 0) + p + q + n_exog
@@ -427,14 +420,14 @@ class ArimaRegressor:
             if len(paired) < min_rows:
                 raise FlexDataError(
                     f"ArimaRegressor needs at least {min_rows} row(s) to fit "
-                    f"order={self._order} ({k_params} parameter(s)); only "
-                    f"{len(paired)} survived dropping nulls.",
+                    f"order={self._order} ({k_params} parameter(s)); got "
+                    f"{len(paired)}.",
                     field="y",
                 )
 
         self.n_samples = len(paired)
         self.data_window = (paired.index.min(), paired.index.max())
-        self.exogenous_variables = list(exogenous.columns)
+        self.exogenous_variables = list(X.columns)
         self.output_variable = str(output.name)
         self._training_index = paired.index
         y_values = paired["__y__"].to_numpy(dtype=float)
@@ -442,43 +435,41 @@ class ArimaRegressor:
             paired[self.exogenous_variables].to_numpy(dtype=float) if n_exog else None
         )
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            if self._auto:
-                self._order = self._auto_order(y_values, x_values)
-            p, d, q = self._order
-            terms = ArimaTerms(
-                p=p,
-                d=d,
-                q=q,
-                n_exog=n_exog,
-                has_const=self._include_mean and d == 0,
-                has_drift=d == 1 and (self._include_mean or self._include_drift),
-            )
-            refine = None
-            if self._fit_solver == "ipopt":
-                refine = partial(
-                    fit_output_error_ipopt,
-                    terms=terms,
-                    y=y_values,
-                    x=x_values,
-                    exog_names=self.exogenous_variables,
-                    input_units=self.input_units,
-                    output_name=self.output_variable,
-                    output_units=self.output_units,
-                    training_index=self._training_index,
-                    max_ar_persistence=self._max_ar_persistence,
-                )
-            self.model = fit_direct(
-                y_values,
-                x_values,
-                terms,
-                self.exogenous_variables,
-                fit_objective=self._fit_objective,
-                forecast_horizon=self._resolve_horizon(len(paired), terms),
+        if self._auto:
+            self._order = self._auto_order(y_values, x_values)
+        p, d, q = self._order
+        terms = ArimaTerms(
+            p=p,
+            d=d,
+            q=q,
+            n_exog=n_exog,
+            has_const=self._include_mean and d == 0,
+            has_drift=d == 1 and (self._include_mean or self._include_drift),
+        )
+        refine = None
+        if self._fit_solver == "ipopt":
+            refine = partial(
+                fit_output_error_ipopt,
+                terms=terms,
+                y=y_values,
+                x=x_values,
+                exog_names=self.exogenous_variables,
+                input_units=self.input_units,
+                output_name=self.output_variable,
+                output_units=self.output_units,
+                training_index=self._training_index,
                 max_ar_persistence=self._max_ar_persistence,
-                refine=refine,
             )
+        self.model = fit_direct(
+            y_values,
+            x_values,
+            terms,
+            self.exogenous_variables,
+            fit_objective=self._fit_objective,
+            forecast_horizon=self._resolve_horizon(len(paired), terms),
+            max_ar_persistence=self._max_ar_persistence,
+            refine=refine,
+        )
         self._fitted = True
         # Only the trivial seasonal order can be fit, so none survives it.
         self._seasonal_order = None
@@ -578,36 +569,14 @@ class ArimaRegressor:
             )
 
     @property
-    def model_(self) -> dict[str, object]:
-        """A dict view of the fitted model's key attributes.
-
-        Provides ``"coef"``, ``"residuals"``, ``"aic"``, ``"bic"``,
-        ``"aicc"``, ``"loglik"``, and ``"sigma2"`` keys. ``"residuals"`` is
-        the full-length array, whose leading ``max(p, q)`` entries are zero
-        padding; every derived statistic excludes that padding. ``"aicc"``
-        is ``None`` when too few effective observations remain to define it.
-
-        Raises:
-            FlexDataError: If :meth:`fit` has not been called.
-        """
-        self._require_fit("accessing model attributes")
-        m = self.model
-        return {
-            "coef": self.coefficients,
-            "residuals": m.resid,
-            "aic": float(m.aic),
-            "bic": float(m.bic),
-            "aicc": m.aicc,
-            "loglik": float(m.llf),
-            "sigma2": m.sigma2,
-        }
-
-    @property
     def coefficients(self) -> dict[str, float] | None:
         """The fitted parameters as a name -> value mapping.
 
-        Names are ``const`` or ``drift``, ``ar{j}``, ``ma{j}``, then the
-        exogenous column names.
+        Names match the coefficient registry of the
+        :class:`~flexops.surrogates.arima.ArimaSurrogate` built from
+        :meth:`to_surrogate_spec`: ``intercept`` (``d=0``) or ``drift``
+        (``d=1``) when the model has a deterministic term, ``ar.L{j}``,
+        ``ma.L{j}``, then ``exog.<column>`` for each exogenous input.
 
         Returns:
             The parameter map, or ``None`` before :meth:`fit` is called.
@@ -671,13 +640,7 @@ class ArimaRegressor:
     def to_fit_result(self) -> FitResult:
         """Return this fit as the shared :class:`~.base.FitResult` shape.
 
-        The coefficient map contains:
-
-        - ``"const"`` (``d=0``) or ``"drift"`` (``d=1``) when the model has
-          a deterministic term, and neither when it does not,
-        - ``"ar.L{j}"`` for each AR lag ``j``,
-        - ``"ma.L{j}"`` for each MA lag ``j``,
-        - exogenous coefficients keyed by their column name.
+        The coefficient map is :attr:`coefficients`.
 
         Returns:
             A :class:`~flexparameterize.regression.base.FitResult` carrying
@@ -687,20 +650,8 @@ class ArimaRegressor:
             FlexDataError: If :meth:`fit` has not been called.
         """
         self._require_fit("to_fit_result()")
-        terms = self.model.terms
-        c, ar, ma, beta = terms.unpack(self.model.params)
-        coefficients = {
-            **{f"ar.L{j}": float(v) for j, v in enumerate(ar, 1)},
-            **{f"ma.L{j}": float(v) for j, v in enumerate(ma, 1)},
-            **{
-                name: float(v)
-                for name, v in zip(self.exogenous_variables, beta, strict=True)
-            },
-        }
-        if terms.n_deterministic:
-            coefficients["const" if terms.has_const else "drift"] = c
         return FitResult(
-            coefficients=coefficients,
+            coefficients=self.coefficients,
             metrics=dict(self.metrics),
             n_samples=self.n_samples,
             data_window=self.data_window,
@@ -798,40 +749,50 @@ class ArimaRegressor:
         }
 
 
-def _single_column(frame: pd.DataFrame | pd.Series, role: str) -> pd.Series:
-    """Return the one column of ``frame`` as a named Series.
+def _require_clean_series(paired: pd.DataFrame) -> None:
+    """Require a non-empty, null-free frame on an evenly spaced DatetimeIndex.
 
     Args:
-        frame: A one-column ``DataFrame`` or a ``Series``.
-        role: ``"X"`` or ``"y"``, for the error message.
-
-    Returns:
-        The column as a named ``Series``.
+        paired: ``y`` joined column-wise with the exogenous inputs. A row
+            present in only one of them shows up here as a null.
 
     Raises:
-        FlexDataError: If ``frame`` does not hold exactly one column.
+        FlexDataError: If the index is not a ``DatetimeIndex``, the frame is
+            empty or holds a null value, or consecutive timestamps are not
+            separated by one constant, positive step.
     """
-    if isinstance(frame, pd.Series):
-        return frame
-    if frame.shape[1] != 1:
+    index = paired.index
+    if not isinstance(index, pd.DatetimeIndex):
         raise FlexDataError(
-            f"ArimaRegressor fits one output column; {role} has "
-            f"{frame.shape[1]} ({list(frame.columns)}). Select the "
-            "single output column.",
-            field=role,
+            "ArimaRegressor.fit needs X and y indexed by a DatetimeIndex, "
+            "so the fitted surrogate's history can be dated against a "
+            f"TimeBlock; got {type(index).__name__}.",
+            field="y",
         )
-    return frame.iloc[:, 0]
-
-
-def _exog_columns(X: pd.DataFrame | pd.Series) -> pd.DataFrame:
-    """Return exogenous columns as a DataFrame (empty when no columns).
-
-    Args:
-        X: Zero or more exogenous input columns.
-
-    Returns:
-        A ``DataFrame`` (possibly empty) with the same index as ``X``.
-    """
-    if isinstance(X, pd.Series):
-        return X.to_frame()
-    return X if X.shape[1] > 0 else pd.DataFrame(index=X.index)
+    if paired.empty:
+        raise FlexDataError("ArimaRegressor.fit got no rows.", field="y")
+    null_rows = index[paired.isna().any(axis=1)]
+    if len(null_rows):
+        columns = [
+            "y" if name == "__y__" else name
+            for name in paired.columns[paired.isna().any()]
+        ]
+        raise FlexDataError(
+            f"ArimaRegressor.fit needs clean data, but {len(null_rows)} row(s) "
+            f"hold a null value (first at {null_rows[0]}, in column(s) "
+            f"{columns}). Impute or trim the gaps, and make X and y share "
+            "the same index, before fitting.",
+            field="y",
+        )
+    if len(index) > 1:
+        steps = index[1:] - index[:-1]
+        irregular = steps != steps[0]
+        if steps[0] <= pd.Timedelta(0) or irregular.any():
+            at = index[1:][irregular][0] if irregular.any() else index[1]
+            raise FlexDataError(
+                "ArimaRegressor.fit needs evenly spaced, increasing timestamps; "
+                f"the first step is {steps[0]}, but the spacing breaks at {at}. "
+                "Resample onto a regular grid and impute the gaps before "
+                "fitting.",
+                field="y",
+            )
