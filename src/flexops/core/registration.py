@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from flexcore.config.schema import SurrogateSpec
 from flexcore.exceptions import FlexConfigError
 from flexcore.nomenclature import PowerKind
 
@@ -236,6 +237,8 @@ class RelationRecord:
             surrogate built no block). Used by
             :meth:`~flexops.core.ops_block.OpsBlockData.get_surrogate_spec`
             to delegate spec extraction without depending on block attributes.
+        spec: The spec the current surrogate was built from, or ``None`` for a
+            surrogate built by hand (which a spec can't describe).
     """
 
     constraint: Any
@@ -249,6 +252,7 @@ class RelationRecord:
     surrogate_blocks: list = field(default_factory=list)
     surrogate_instances: list = field(default_factory=list)
     surrogate_instance: Any = None
+    spec: SurrogateSpec | None = None
 
 
 @dataclass
