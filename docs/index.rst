@@ -22,12 +22,14 @@ schedule flexible industrial energy operations.
    explanation/energy_nomenclature
    explanation/reported_cost
    explanation/pass_through_and_bypass
+   explanation/electrolyzer_model
 
 .. toctree::
    :maxdepth: 2
    :caption: How-to
 
    how_to/build_a_plant
+   how_to/round_trip_a_model
    how_to/parameterize_from_data
 
 .. toctree::

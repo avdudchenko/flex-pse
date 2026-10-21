@@ -14,7 +14,6 @@ from flexparameterize.regression.base import FitResult, Regressor
 from flexparameterize.regression.constant import (
     COEFFICIENT_NAME,
     ConstantIntensityRegressor,
-    constant_intensity_coefficient,
 )
 from flexparameterize.regression.linear import LinearRegressor
 
@@ -75,6 +74,5 @@ __all__ = [
     "FitResult",
     "LinearRegressor",
     "Regressor",
-    "constant_intensity_coefficient",
     "get_regressor",
 ]

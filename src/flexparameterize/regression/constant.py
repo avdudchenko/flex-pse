@@ -170,11 +170,8 @@ class ConstantIntensityRegressor:
     ) -> SurrogateSpec:
         """Return the fit as a persistable ``SurrogateSpec``.
 
-        The one place a constant-intensity fit becomes a spec: both
-        FlexParameterize directions
-        (:func:`~flexparameterize.apply.apply_to_model` and
-        :func:`~flexparameterize.emit.emit_model_config`) consume this, so the
-        two can never disagree about what was fitted. ``constant_intensity``
+        The one place a constant-intensity fit becomes a spec, which
+        :func:`~flexparameterize.apply.apply_to_model` consumes. ``constant_intensity``
         has no surrogate class (it fixes a process parameter rather than
         swapping a Constraint), so unlike a real surrogate's declared units,
         these are recorded for documentation, not enforced by a build.

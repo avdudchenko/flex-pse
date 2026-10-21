@@ -4,19 +4,25 @@ from importlib.metadata import version as _dist_version
 
 from flexcore.nomenclature import PowerKind
 from flexops.core.build import build_model
+from flexops.core.emit import emit_model
+from flexops.core.extensions import extension
+from flexops.core.fixing import FixReport, FixViolation
 from flexops.core.network_block import NetworkBlock
 from flexops.core.plant_block import PlantBlock
 from flexops.core.registration import BoundaryKind
+from flexops.core.stages import apply_spec
 from flexops.core.time_block import TimeBlock
 from flexops.costing import FlexCosting
 from flexops.properties.simple_aqueous import SimpleAqueousFlow
 from flexops.properties.simple_gas import SimpleGasFlow
 from flexops.unit_models import (
     BatteryModel,
+    CO2Electrolyzer,
     Combustor,
     ConstantEnergyIntensityModel,
     DIDOBlock,
     Digestor,
+    Electrolyzer,
     Exchanger,
     Feed,
     GenericRenewables,
@@ -29,7 +35,9 @@ from flexops.unit_models import (
     SISOBlock,
     Splitter,
     Tank,
+    WaterElectrolyzer,
 )
+from flexops.unit_models.electrolyzer import ElectrolyzerTechnology, ProductPhase
 from flexops.unit_models.mixer import MixerTemperatureRule
 from flexops.unit_models.powergeneration.combustor import CombustorPowerRelation
 
@@ -38,13 +46,18 @@ __version__ = _dist_version("flex-pse")
 __all__ = [
     "BatteryModel",
     "BoundaryKind",
+    "CO2Electrolyzer",
     "Combustor",
     "CombustorPowerRelation",
     "ConstantEnergyIntensityModel",
     "DIDOBlock",
     "Digestor",
+    "Electrolyzer",
+    "ElectrolyzerTechnology",
     "Exchanger",
     "Feed",
+    "FixReport",
+    "FixViolation",
     "FlexCosting",
     "GenericRenewables",
     "GridConnection",
@@ -54,6 +67,7 @@ __all__ = [
     "PlantBlock",
     "PowerKind",
     "Product",
+    "ProductPhase",
     "Pump",
     "ReverseOsmosis",
     "SIDOBlock",
@@ -63,6 +77,10 @@ __all__ = [
     "Splitter",
     "Tank",
     "TimeBlock",
+    "WaterElectrolyzer",
     "__version__",
+    "apply_spec",
     "build_model",
+    "emit_model",
+    "extension",
 ]

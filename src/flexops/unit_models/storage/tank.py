@@ -82,6 +82,7 @@ class TankData(SISOBlockData):
         ... )
     """
 
+    allows_status_element = False
     CONFIG = SISOBlockData.CONFIG()
     CONFIG.declare(
         "min_volume",
