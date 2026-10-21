@@ -32,61 +32,10 @@ A spec ({class}`~flexcore.config.spec.FlowsheetSpec`) is a header (the
   `"plant.ro"` (every member of an indexed unit) or `"plant.ro[0]"` (one).
 - **File order is irrelevant.** The build sorts elements by kind, depth and
   name. Shuffling the list builds the same model, component for component.
-  So this scrambled spec is valid. It is the frozen API example, with the
-  objective listed before the units it optimizes and the plant after the units
-  inside it:
 
-## The model set
-
-The schema shrinks from the top level
-{class}`~flexcore.config.schema.ModelConfig` down to individual variables.
-
-- {class}`~flexcore.config.schema.ModelConfig` is the top level artifact.
-  It holds `schema_version`, a
-  {class}`~flexcore.config.schema.TimeConfig`, a `properties` spec, a
-  {class}`~flexcore.config.schema.CostingConfig`, and **exactly one** of a
-  {class}`~flexcore.config.schema.NetworkConfig` **or** a
-  {class}`~flexcore.config.schema.PlantConfig` (a validator enforces the
-  exactly one of rule with a clear field path message).
-- {class}`~flexcore.config.schema.NetworkConfig` is a named collection of
-  plants plus the arcs between them.
-- {class}`~flexcore.config.schema.PlantConfig` is a named collection of
-  units plus the arcs between them.
-- {class}`~flexcore.config.schema.UnitConfig` describes one unit model.
-  Its class name, construction options, declared IO variables, an optional
-  {class}`~flexcore.config.schema.SurrogateSpec`, a
-  {class}`~flexcore.config.schema.UnitCommitmentConfig`, and an optional
-  {class}`~flexcore.config.schema.ExternalDispatchSpec`.
-- {class}`~flexcore.config.schema.IOVariableSpec`,
-  {class}`~flexcore.config.schema.SurrogateSpec`,
-  {class}`~flexcore.config.schema.CostingConfig` (carrying a
-  {class}`~flexcore.config.schema.DRConfig` container slot), and
-  {class}`~flexcore.config.schema.TimeConfig` fill in the leaves.
-
-`flexops.build_model(config)` constructs the whole Pyomo model from a
-validated `ModelConfig`.
-
-## How a surrogate describes its function
-
-{class}`~flexcore.config.schema.SurrogateSpec` names a **predefined surrogate
-class** — one of {class}`~flexcore.config.schema.SurrogateType`'s members —
-and carries an opaque `data` mapping in the shape that class defines. The
-class (`flexops.surrogates`) validates `data` and builds the Pyomo
-relationship; a type not yet implemented raises `NotImplementedError` when the
-model is built, not when the config is validated. `arima` is now implemented by
-{class}`~flexops.surrogates.arima.ArimaSurrogate` and paired with
-{class}`~flexparameterize.regression.arima.ArimaRegressor`; `neural_network`
-remains reserved without an implementation today — see
-{doc}`../reference/flexops/surrogates`).
-
-The only implemented class, `multilinear`
-({class}`~flexops.surrogates.multilinear.MultilinearSurrogate`), is a
-constant plus a sum of `coefficient * (product of distinct declared
-inputs)`. That expanded form covers a linear relationship (no cross terms)
-and a bilinear one (one cross term) alike. A coefficient key is a `*`
-separated product of names from `input_variables`, each appearing at most
-once (no `^` exponent, no repeated factor). The reserved key `intercept`
-is the constant term.
+So this scrambled spec is valid. It is the frozen API example, with the
+objective listed before the units it optimizes and the plant after the units
+inside it:
 
 ```json
 {
@@ -286,11 +235,14 @@ element, names a **predefined surrogate class**, one of
 mapping in the shape that class defines. The class (`flexops.surrogates`)
 validates `data` and builds the Pyomo relationship. A type not yet implemented
 raises `NotImplementedError` when the model is built (`quadratic`,
-`exponential`, `arima` and `neural_network` are reserved names, see
+`exponential` and `neural_network` are reserved names, see
 {doc}`../reference/flexops/surrogates`).
 
-The only implemented class, `multilinear`
-({class}`~flexops.surrogates.multilinear.MultilinearSurrogate`), is a constant
+`arima` is implemented by {class}`~flexops.surrogates.arima.ArimaSurrogate`
+and fitted by {class}`~flexparameterize.regression.arima.ArimaRegressor`.
+
+The `multilinear` class
+({class}`~flexops.surrogates.multilinear.MultilinearSurrogate`) is a constant
 plus a sum of `coefficient * (product of distinct declared inputs)`. A
 coefficient key is a `*`-separated product of names from `input_variables`,
 each at most once. The reserved key `intercept` is the constant term.
