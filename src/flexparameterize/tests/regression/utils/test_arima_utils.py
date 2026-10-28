@@ -8,29 +8,32 @@ rather than as a drifted fit downstream.
 from __future__ import annotations
 
 import datetime
-import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from flexcore.exceptions import FlexConfigError
+from flexcore.exceptions import FlexConfigError, FlexDataError
 from flexparameterize.regression.utils.arima_utils import (
     AUTO_MAX_HORIZON,
+    KPSS_CRITICAL_5PCT,
     ArimaTerms,
     DirectResults,
-    _ignore_auto_arima_search_warnings,
     ar_max_root,
     auto_forecast_horizon,
+    auto_search_options,
+    auto_select_order,
     coefficient_bounds,
     equation_error_residuals,
     free_run,
     history_payload,
     history_steps,
+    kpss_statistic,
     ma_max_root,
     one_step_innovations,
     output_error_residuals,
     seed_history,
+    select_differencing,
     surrogate_coefficients,
 )
 
@@ -376,28 +379,122 @@ def test_surrogate_coefficients_name_the_deterministic_term_by_order():
     }
 
 
+# -- auto order search -------------------------------------------------------
+
+
+def _simulate_arma(ar, ma, n, seed, burn=200):
+    """Return ``n`` rows of a zero-mean ARMA process with unit innovations."""
+    eps = np.random.default_rng(seed).normal(size=n + burn)
+    z = np.zeros(n + burn)
+    for t in range(n + burn):
+        z[t] = eps[t]
+        z[t] += sum(a * z[t - j - 1] for j, a in enumerate(ar) if t > j)
+        z[t] += sum(m * eps[t - j - 1] for j, m in enumerate(ma) if t > j)
+    return z[burn:]
+
+
+def _search(y, x=None, **overrides):
+    options = auto_search_options(overrides)
+    return auto_select_order(
+        y, x, include_mean=True, max_ar_persistence=None, **options
+    )
+
+
 @pytest.mark.unit
-def test_auto_arima_search_filter_silences_only_known_noise():
-    """The search filter drops statsforecast's known noise and nothing else."""
-    sm_exceptions = pytest.importorskip("statsmodels.tools.sm_exceptions")
+def test_kpss_separates_white_noise_from_a_random_walk():
+    """KPSS stays below the 5% critical value for noise and exceeds it for a walk."""
+    noise = np.random.default_rng(0).normal(size=400)
+    assert kpss_statistic(noise) < KPSS_CRITICAL_5PCT
+    assert kpss_statistic(np.cumsum(noise)) > KPSS_CRITICAL_5PCT
+    assert kpss_statistic(np.full(50, 3.0)) == 0.0
 
-    emitted = [
-        ("kpss currently returns a plain tuple", FutureWarning),
-        ("statistic outside table", sm_exceptions.InterpolationWarning),
-        ("The line search algorithm did not converge", RuntimeWarning),
-        ("Rounding errors prevent the line search from converging", RuntimeWarning),
-        ("some other future change", FutureWarning),
-        ("overflow encountered in exp", RuntimeWarning),
-        ("a genuine user warning", UserWarning),
-    ]
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        _ignore_auto_arima_search_warnings()
-        for message, category in emitted:
-            warnings.warn(message, category, stacklevel=1)
 
-    assert [str(w.message) for w in caught] == [
-        "some other future change",
-        "overflow encountered in exp",
-        "a genuine user warning",
-    ]
+@pytest.mark.unit
+def test_select_differencing_tests_the_disturbance_not_y():
+    """A trend the exogenous input explains is not mistaken for a unit root."""
+    rng = np.random.default_rng(1)
+    trend = np.linspace(0.0, 50.0, 300)
+    y = 2.0 * trend + rng.normal(size=300)
+    assert select_differencing(y, None, max_d=1) == 1
+    assert select_differencing(y, trend[:, None], max_d=1) == 0
+    assert select_differencing(y, None, max_d=0) == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("ar", "ma", "expected"),
+    [([0.6, -0.3], [], (2, 0, 0)), ([], [0.7], (0, 0, 1)), ([0.5], [0.4], (1, 0, 1))],
+)
+def test_auto_select_order_recovers_the_generating_order(ar, ma, expected):
+    """On a long simulated series the AIC search finds the true order."""
+    y = 5.0 + _simulate_arma(ar, ma, n=1500, seed=3)
+    assert _search(y, max_p=3, max_q=3) == expected
+
+
+@pytest.mark.unit
+def test_auto_select_order_differences_a_random_walk():
+    """A random walk with AR(1) increments is fitted as d=1."""
+    y = np.cumsum(_simulate_arma([0.5], [], n=800, seed=4))
+    assert _search(y, max_p=2, max_q=2) == (1, 1, 0)
+    assert _search(y, max_p=2, max_q=2, stationary=True)[1] == 0
+    assert _search(y, max_p=2, max_q=2, d=0)[1] == 0
+
+
+@pytest.mark.unit
+def test_auto_select_order_respects_max_order():
+    """No candidate with p + q above max_order is considered."""
+    y = _simulate_arma([0.5], [0.4], n=1000, seed=5)
+    p, _d, q = _search(y, max_p=3, max_q=3, max_order=1)
+    assert p + q <= 1
+
+
+@pytest.mark.unit
+def test_auto_select_order_with_exogenous_input():
+    """An exogenous effect is fitted out: the order matches the bare disturbance."""
+    rng = np.random.default_rng(6)
+    x = rng.uniform(0.0, 2.0, size=(1000, 1))
+    disturbance = _simulate_arma([0.7], [], n=1000, seed=6)
+    y = 3.0 * x[:, 0] + disturbance
+    assert _search(y, x, max_p=2, max_q=2) == _search(disturbance, max_p=2, max_q=2)
+
+
+@pytest.mark.unit
+def test_auto_select_order_skips_orders_the_data_cannot_identify():
+    """Short series drop large candidates; with none left it is a data error."""
+    y = _simulate_arma([0.5], [], n=8, seed=7)
+    p, _d, q = _search(y, d=0)
+    assert max(p, q) + 0 + 1 + p + q + 1 <= len(y)
+    with pytest.raises(FlexDataError, match="too few to fit"):
+        _search(y[:1], d=0)
+
+
+@pytest.mark.unit
+def test_auto_search_options_defaults_and_stationary():
+    """Defaults fill in, and stationary=True is folded into max_d=0."""
+    assert auto_search_options({}) == {
+        "max_p": 5,
+        "max_q": 5,
+        "max_order": 5,
+        "max_d": 1,
+        "d": None,
+    }
+    assert auto_search_options({"stationary": True})["max_d"] == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"approximation": True}, "does not accept"),
+        ({"max_p": -1}, "non-negative int"),
+        ({"max_q": 1.5}, "non-negative int"),
+        ({"max_order": True}, "non-negative int"),
+        ({"max_d": 2}, "at most d=1"),
+        ({"d": True}, "at most d=1"),
+        ({"stationary": "yes"}, "must be a bool"),
+        ({"stationary": True, "d": 1}, "cannot be combined"),
+    ],
+)
+def test_auto_search_options_reject_invalid(kwargs, match):
+    with pytest.raises(FlexConfigError, match=match):
+        auto_search_options(kwargs)

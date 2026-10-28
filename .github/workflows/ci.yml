@@ -50,9 +50,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # Install [parameterize] so statsforecast-dependent tests run
-      # instead of failing (e.g. test_auto_arima_selects_order).
-      - run: pip install -e ".[dev,solvers,parameterize]"
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true

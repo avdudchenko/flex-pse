@@ -21,7 +21,6 @@ by an :class:`ArimaTerms`. Two fitting criteria are supported:
 from __future__ import annotations
 
 import math
-import warnings
 from dataclasses import dataclass
 from types import MethodType
 
@@ -936,69 +935,239 @@ def fit_output_error_ipopt(
     )
 
 
-def _ignore_auto_arima_search_warnings() -> None:
-    """Silence the expected noise from statsforecast's order search.
+# Defaults for the ``auto=True`` order search, as in R ``forecast::auto.arima``
+# with ``stepwise=False``, except that ``d`` is capped at 1 because the Pyomo
+# surrogate supports at most one order of differencing.
+AUTO_SEARCH_DEFAULTS: dict[str, object] = {
+    "max_p": 5,
+    "max_q": 5,
+    "max_order": 5,
+    "max_d": 1,
+    "d": None,
+    "stationary": False,
+}
 
-    Call inside ``warnings.catch_warnings()``. AutoARIMA's unit-root tests
-    call statsmodels ``kpss``, which warns about its tuple return layout
-    and about statistics beyond its p-value table; its candidate fits run
-    scipy BFGS, which warns when a line search stalls on a poor candidate.
-    None affects the selected order, which :func:`fit_direct` then refits.
-    Other warnings, including any from that refit, stay visible.
+# 5% critical value of the KPSS level-stationarity statistic (Kwiatkowski et
+# al. 1992, Table 1), the unit-root test auto.arima uses to choose ``d``.
+KPSS_CRITICAL_5PCT = 0.463
+
+# Rows the order search drops after the largest candidate lag before scoring.
+# The innovations start from zero, and a candidate with more MA terms can fit
+# that start-up transient rather than the process. Scored over it, the search
+# missed the true order of 16 of 30 simulated ARMA series (n=400, max_p=max_q=3)
+# and 8 of 30 with this burn-in; an exact-likelihood AIC search (statsmodels)
+# missed 15.
+AUTO_SCORE_BURN_IN = 10
+
+
+def auto_search_options(auto_kwargs: dict[str, object]) -> dict[str, object]:
+    """Validate the ``auto=True`` search options and fill in the defaults.
+
+    Args:
+        auto_kwargs: The caller's options, a subset of
+            :data:`AUTO_SEARCH_DEFAULTS`.
+
+    Returns:
+        Every option, as keyword arguments for :func:`auto_select_order`
+        (``stationary`` is folded into ``max_d``).
+
+    Raises:
+        FlexConfigError: If an option is unknown or out of range, or if
+            ``stationary=True`` is combined with ``d=1``.
     """
-    warnings.filterwarnings(
-        "ignore", message="kpss currently returns", category=FutureWarning
-    )
-    try:
-        from statsmodels.tools.sm_exceptions import InterpolationWarning
-    except ImportError:
-        pass
-    else:
-        warnings.filterwarnings("ignore", category=InterpolationWarning)
-    # scipy does not export LineSearchWarning (a RuntimeWarning) publicly.
-    warnings.filterwarnings(
-        "ignore",
-        message=(
-            "(The line search algorithm did not converge"
-            "|Rounding errors prevent the line search from converging)"
-        ),
-        category=RuntimeWarning,
-    )
+    unknown = sorted(set(auto_kwargs) - set(AUTO_SEARCH_DEFAULTS))
+    if unknown:
+        raise FlexConfigError(
+            f"ArimaRegressor auto=True does not accept {unknown}; the order "
+            f"search takes only {sorted(AUTO_SEARCH_DEFAULTS)}. It is always "
+            "non-seasonal and ranks candidates by AIC.",
+            field="auto_kwargs",
+            value=unknown,
+        )
+    options = {**AUTO_SEARCH_DEFAULTS, **auto_kwargs}
+    for key in ("max_p", "max_q", "max_order"):
+        value = options[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise FlexConfigError(
+                f"ArimaRegressor {key} must be a non-negative int, got {value!r}.",
+                field=key,
+                value=value,
+            )
+    for key, allowed in (("max_d", (0, 1)), ("d", (None, 0, 1))):
+        value = options[key]
+        if isinstance(value, bool) or value not in allowed:
+            raise FlexConfigError(
+                f"ArimaRegressor {key} must be one of {list(allowed)}, got "
+                f"{value!r}; the Pyomo surrogate supports at most d=1.",
+                field=key,
+                value=value,
+            )
+    stationary = options.pop("stationary")
+    if not isinstance(stationary, bool):
+        raise FlexConfigError(
+            f"ArimaRegressor stationary must be a bool, got {stationary!r}.",
+            field="stationary",
+            value=stationary,
+        )
+    if stationary:
+        if options["d"] == 1:
+            raise FlexConfigError(
+                "ArimaRegressor stationary=True restricts the search to d=0, "
+                "so it cannot be combined with d=1.",
+                field="stationary",
+                value=True,
+            )
+        options["max_d"] = 0
+    return options
+
+
+def kpss_statistic(z: np.ndarray) -> float:
+    """Return the KPSS statistic for level stationarity of ``z``.
+
+    The long-run variance uses a Bartlett kernel with the "short" lag
+    truncation ``int(4 * (n / 100) ** 0.25)`` of Kwiatkowski et al. (1992).
+
+    Args:
+        z: The series to test.
+
+    Returns:
+        The statistic; large values reject stationarity. 0.0 for a constant
+        series.
+    """
+    z = np.asarray(z, dtype=float)
+    n = len(z)
+    e = z - z.mean()
+    lags = min(int(4 * (n / 100) ** 0.25), n - 1)
+    long_run_var = e @ e / n
+    for j in range(1, lags + 1):
+        long_run_var += 2.0 * (1.0 - j / (lags + 1)) * (e[j:] @ e[:-j]) / n
+    if long_run_var <= 0:
+        return 0.0
+    partial_sums = np.cumsum(e)
+    return float(partial_sums @ partial_sums / (n * n * long_run_var))
+
+
+def select_differencing(y: np.ndarray, x: np.ndarray | None, max_d: int) -> int:
+    """Choose ``d`` by a KPSS test on the regression disturbance.
+
+    As in auto.arima, ``y`` is first regressed on ``X`` (plus an intercept),
+    so a trend the inputs explain does not count as a unit root.
+
+    Args:
+        y: Output series on the level scale.
+        x: Exogenous matrix, or ``None``.
+        max_d: Largest ``d`` allowed, 0 or 1.
+
+    Returns:
+        1 if ``max_d`` allows it and the test rejects level stationarity at
+        5%, else 0.
+    """
+    if max_d == 0 or len(y) < 3:
+        return 0
+    eta = np.asarray(y, dtype=float)
+    if x is not None and x.shape[1]:
+        design = np.column_stack([np.ones(len(eta)), x])
+        eta = eta - design @ np.linalg.lstsq(design, eta, rcond=None)[0]
+    return int(kpss_statistic(eta) > KPSS_CRITICAL_5PCT)
 
 
 def auto_select_order(
     y: np.ndarray,
     x: np.ndarray | None,
     *,
-    auto_kwargs: dict[str, object],
+    include_mean: bool,
+    max_ar_persistence: float | None,
+    max_p: int,
+    max_q: int,
+    max_order: int,
+    max_d: int,
+    d: int | None,
 ) -> tuple[int, int, int]:
-    """Select a non-seasonal order with statsforecast ``AutoARIMA``.
+    """Select a non-seasonal ``(p, d, q)`` by an exhaustive AIC search.
 
-    The caller validates ``d`` and refits the returned order with
-    :func:`fit_direct`.
+    ``d`` comes from :func:`select_differencing` unless given. Every
+    ``(p, q)`` with ``p <= max_p``, ``q <= max_q`` and ``p + q <= max_order``
+    is then fitted by equation-error least squares, under the same AR bound
+    as the final fit, and ranked by AIC over one common sample: the rows
+    after the largest lag any candidate uses plus
+    :data:`AUTO_SCORE_BURN_IN`, so candidates of different order are
+    compared on the same innovations, past the zero-initialized start-up.
+    Candidates the data cannot identify, or whose AR block is not
+    stationary or MA block not invertible, are skipped. Ties go to the
+    smaller order.
 
     Args:
-        y: Output series.
+        y: Output series on the level scale.
         x: Exogenous matrix, or ``None``.
-        auto_kwargs: Extra keyword arguments forwarded to ``AutoARIMA``
-            (e.g. ``max_p``, ``max_q``, ``stationary``).
+        include_mean: Whether candidates carry the deterministic term.
+        max_ar_persistence: Bound on every AR coefficient, or ``None``.
+        max_p: Largest AR order searched.
+        max_q: Largest MA order searched.
+        max_order: Largest ``p + q`` searched.
+        max_d: Largest ``d`` the differencing test may choose, 0 or 1.
+        d: Fixed differencing order, or ``None`` to test for it.
 
     Returns:
         The selected ``(p, d, q)``.
 
     Raises:
-        FlexConfigError: If statsforecast is not installed.
+        FlexDataError: If ``y`` has too few rows to fit any candidate.
+        FlexConfigError: If every candidate is non-stationary or
+            non-invertible.
     """
-    try:
-        from statsforecast.models import AutoARIMA
-    except ImportError as exc:
-        raise FlexConfigError(
-            "ArimaRegressor auto=True requires statsforecast for order "
-            "selection. Install it with `pip install 'flex-pse[parameterize]'`."
-        ) from exc
+    y = np.asarray(y, dtype=float)
+    n_exog = 0 if x is None else x.shape[1]
+    if d is None:
+        d = select_differencing(y, x, max_d)
+    candidates = []
+    for p in range(max_p + 1):
+        for q in range(min(max_q, max_order - p) + 1):
+            terms = ArimaTerms(
+                p=p,
+                d=d,
+                q=q,
+                n_exog=n_exog,
+                has_const=include_mean and d == 0,
+                has_drift=include_mean and d == 1,
+            )
+            # The row requirement ArimaRegressor.fit applies to a fixed order.
+            if len(y) >= max(p, q) + d + terms.n_params + 1:
+                candidates.append(terms)
+    if not candidates:
+        raise FlexDataError(
+            f"ArimaRegressor auto=True has {len(y)} row(s), too few to fit "
+            f"even the smallest candidate order with d={d}.",
+            field="y",
+        )
 
-    with warnings.catch_warnings():
-        _ignore_auto_arima_search_warnings()
-        fitted = AutoARIMA(seasonal=False, ic="aic", **auto_kwargs).fit(y, X=x)
-    p, q, _P, _Q, _m, d, _D = (int(value) for value in fitted.model_["arma"])
-    return p, d, q
+    largest_lag = max(max(t.p, t.q) for t in candidates)
+    # Keep at least half of the shortest candidate's innovations scored.
+    burn_in = min(AUTO_SCORE_BURN_IN, (len(y) - d - largest_lag) // 2)
+    score_start = largest_lag + burn_in
+    best_order, best_aic = None, np.inf
+    for terms in candidates:
+        theta = initial_theta(terms, y, x)
+        if theta.size:
+            theta = _least_squares(
+                equation_error_residuals,
+                theta,
+                (terms, y, x),
+                coefficient_bounds(terms, max_ar_persistence),
+            )
+        _c, ar, ma, _beta = terms.unpack(theta)
+        if ar_max_root(ar) >= 1.0 or ma_max_root(ma) >= 1.0:
+            continue
+        resid = one_step_innovations(theta, terms, y, x)[1][score_start:]
+        sigma2 = max(float(resid @ resid) / len(resid), np.finfo(float).tiny)
+        # Gaussian AIC, up to a constant every candidate shares.
+        aic = len(resid) * np.log(sigma2) + 2.0 * (terms.n_params + 1)
+        if aic < best_aic:
+            best_order, best_aic = (terms.p, terms.d, terms.q), aic
+    if best_order is None:
+        raise FlexConfigError(
+            f"ArimaRegressor auto=True found no stationary, invertible "
+            f"candidate among {len(candidates)} order(s) with d={d}. Lower "
+            f"max_p/max_q, set d explicitly, or pass an explicit order.",
+            field="order",
+        )
+    return best_order

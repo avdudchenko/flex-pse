@@ -8,10 +8,10 @@ standard :class:`~flexparameterize.regression.base.FitResult` /
 and forecasting machinery lives in
 :mod:`flexparameterize.regression.utils.arima_utils`.
 
-``statsforecast`` ships in the ``[parameterize]`` extra and is used only when
-``auto=True``, for order selection; the final parameter fit always uses the
-direct least-squares backend, which minimizes the exact residual the Pyomo
-surrogate implements.
+With ``auto=True`` the order is chosen by an in-house search (a KPSS test
+for ``d``, then an AIC grid over ``(p, q)``); the final parameter fit always
+uses the direct least-squares backend, which minimizes the exact residual the
+Pyomo surrogate implements.
 
 **Restriction**: ``d`` may be ``0`` or ``1``, and the model is
 non-seasonal. The Pyomo surrogate implements the mean ARIMA equation in closed
@@ -69,6 +69,7 @@ from flexparameterize.regression.utils.arima_utils import (
     ArimaTerms,
     ar_max_root,
     auto_forecast_horizon,
+    auto_search_options,
     auto_select_order,
     fit_direct,
     fit_output_error_ipopt,
@@ -88,9 +89,8 @@ _FIT_SOLVERS = ("scipy", "ipopt")
 class ArimaRegressor:
     """Fit regression with ARIMA errors and expose the shared fit protocol.
 
-    Either supply an explicit ``order``, or set ``auto=True`` to delegate
-    order selection to statsforecast ``AutoARIMA`` and refit the winning
-    order with the direct least-squares backend.
+    Either supply an explicit ``order``, or set ``auto=True`` to search for
+    one and refit the winning order with the direct least-squares backend.
 
     **Restriction**: ``d`` may be ``0`` or ``1`` (the Pyomo surrogate's mean
     ARIMA equation supports at most a single order of differencing), and
@@ -114,11 +114,12 @@ class ArimaRegressor:
         include_mean: Whether to include the model's deterministic term.
             This is a level intercept for ``d=0`` and constant drift for
             ``d=1``. Default ``True``.
-        auto: If ``True``, run ``statsforecast.models.AutoARIMA`` to
-            discover the best order, then refit that order with the direct
-            backend for Pyomo compatibility.  The search is non-seasonal
-            and may select ``d=0`` or ``d=1``.  Use ``auto_kwargs`` to
-            restrict it (e.g. ``max_d=1``, ``stationary=True``).
+        auto: If ``True``, search for the order, then refit it with the
+            configured ``fit_objective``. ``d`` is 1 when a KPSS test (5%)
+            rejects level stationarity of the disturbance ``y - X @ beta``,
+            else 0. Every ``(p, q)`` within the limits is then fitted by
+            equation-error least squares and the lowest-AIC stationary,
+            invertible candidate wins. Use ``auto_kwargs`` to restrict it.
         max_ar_persistence: Bounds every AR coefficient to
             ``[-max_ar_persistence, max_ar_persistence]`` during the fit
             itself (via bounded least squares). Default ``0.85``. Set to
@@ -136,13 +137,15 @@ class ArimaRegressor:
         fit_solver: ``"scipy"`` (default) or ``"ipopt"``, the optimizer
             behind an ``output_error`` fit. ``"ipopt"`` minimizes the free
             run through the real ``ArimaSurrogate`` over the whole series.
-        **auto_kwargs: Extra keyword arguments forwarded to ``AutoARIMA``
-            (e.g. ``max_p``, ``max_q``, ``max_d``, ``stationary``), except
-            ``seasonal`` and ``ic``, which this class sets.
+        **auto_kwargs: Order-search limits, only with ``auto=True``:
+            ``max_p`` and ``max_q`` (default 5), ``max_order`` (largest
+            ``p + q``, default 5), ``max_d`` (0 or 1, default 1), ``d``
+            (fix the differencing order instead of testing for it), and
+            ``stationary`` (``True`` forces ``d=0``).
 
     Raises:
         FlexConfigError: If ``d > 1``; if ``auto_kwargs`` is given without
-            ``auto=True``, or sets ``seasonal`` or ``ic``; if
+            ``auto=True``, or holds an unknown or out-of-range option; if
             ``max_ar_persistence`` is not a number in ``(0, 1]`` or ``None``;
             or if ``fit_objective``, ``forecast_horizon``, or ``fit_solver``
             is invalid or combined with an option it does not apply to.
@@ -234,19 +237,12 @@ class ArimaRegressor:
         if auto_kwargs and not auto:
             raise FlexConfigError(
                 f"ArimaRegressor got unexpected keyword argument(s) "
-                f"{sorted(auto_kwargs)}. Extra keywords are forwarded to "
-                "AutoARIMA, so they only apply with auto=True.",
+                f"{sorted(auto_kwargs)}. Extra keywords configure the order "
+                "search, so they only apply with auto=True.",
                 field="auto_kwargs",
                 value=sorted(auto_kwargs),
             )
-        reserved = sorted(set(auto_kwargs) & {"seasonal", "ic"})
-        if reserved:
-            raise FlexConfigError(
-                f"ArimaRegressor sets AutoARIMA's {reserved} itself (the search "
-                "is non-seasonal and ranks by AIC); drop them from auto_kwargs.",
-                field="auto_kwargs",
-                value=reserved,
-            )
+        search_options = auto_search_options(auto_kwargs) if auto else {}
         if not auto and order is None:
             raise FlexConfigError(
                 "ArimaRegressor.fit requires either `order=(p,d,q)` or "
@@ -263,7 +259,7 @@ class ArimaRegressor:
         self._order = order
         self._include_mean = include_mean
         self._auto = auto
-        self._auto_kwargs: dict[str, object] = auto_kwargs
+        self._search_options = search_options
         self._max_ar_persistence = max_ar_persistence
 
         self.model = None
@@ -321,8 +317,8 @@ class ArimaRegressor:
 
         Uses ``scipy.optimize.least_squares`` to minimize the mean-equation
         residual directly, so the fitted parameters exactly match the Pyomo
-        surrogate.  When ``auto=True``, statsforecast ``AutoARIMA`` is used
-        for order selection only; the winning order is then refitted.
+        surrogate.  When ``auto=True``, the order is searched for first (see
+        the ``auto`` argument), then refitted.
 
         ``X`` and ``y`` must be clean: no null values, and a shared
         ``DatetimeIndex`` that strictly increases at one constant step. The
@@ -346,8 +342,8 @@ class ArimaRegressor:
             FlexConfigError: If scipy is not installed; if ``auto`` is
                 ``False`` and no ``order`` was supplied; if ``input_units``
                 is missing an entry for one of ``X``'s columns; if ``auto``
-                selects an unsupported order; if the fitted AR block is not
-                stationary; or if an ``output_error`` fit's MA block is not
+                finds no stationary, invertible candidate; if the fitted AR
+                block is not stationary; or if an ``output_error`` fit's MA block is not
                 invertible.
             FlexDataError: If ``X`` or ``y`` is not a ``DataFrame``; if
                 ``y`` does not hold exactly one column; if
@@ -355,8 +351,9 @@ class ArimaRegressor:
                 or are not evenly spaced in time; if there are no rows; or if
                 there are fewer than ``max(p, q) + d + k + 1`` rows (where
                 ``k`` is the number of fitted parameters), which would leave
-                the fit rank-deficient. With ``auto=True`` only one row is
-                required, because the order is not yet known.
+                the fit rank-deficient. With ``auto=True``, candidate orders
+                needing more rows are skipped, and the error is raised only
+                if none fits.
         """
         require_frame(X, regressor="ArimaRegressor", role="X")
         output = single_column(y, regressor="ArimaRegressor", role="y", what="output")
@@ -403,7 +400,13 @@ class ArimaRegressor:
         )
 
         if self._auto:
-            self._order = self._auto_order(y_values, x_values)
+            self._order = auto_select_order(
+                y_values,
+                x_values,
+                include_mean=self._include_mean,
+                max_ar_persistence=self._max_ar_persistence,
+                **self._search_options,
+            )
         p, d, q = self._order
         terms = ArimaTerms(
             p=p,
@@ -450,30 +453,6 @@ class ArimaRegressor:
             "free_run_rmse": self.model.free_run_rmse,
         }
         return self
-
-    def _auto_order(self, y_values, x_values) -> tuple[int, int, int]:
-        """Select an order with AutoARIMA and check the backend can fit it.
-
-        Args:
-            y_values: Output series.
-            x_values: Exogenous matrix, or ``None``.
-
-        Returns:
-            The selected ``(p, d, q)``.
-
-        Raises:
-            FlexConfigError: If AutoARIMA selects ``d > 1``.
-        """
-        order = auto_select_order(y_values, x_values, auto_kwargs=self._auto_kwargs)
-        if order[1] > 1:
-            raise FlexConfigError(
-                f"ArimaRegressor auto=True selected d={order[1]}, but the "
-                f"direct-fit backend and Pyomo surrogate only support "
-                f"d=0 or d=1. Retry with auto_kwargs (e.g. max_d=1).",
-                field="order",
-                value=order,
-            )
-        return order
 
     def _check_stability(self) -> None:
         """Reject a fit whose forecasts would diverge; warn on weaker cases.

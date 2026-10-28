@@ -1,7 +1,7 @@
 """Tests for ArimaRegressor: ARIMA time-series regression with exogenous inputs.
 
 Importing this module (and ``ArimaRegressor`` itself) never requires
-scipy or statsforecast -- only :meth:`ArimaRegressor.fit` does, lazily.
+scipy -- only :meth:`ArimaRegressor.fit` does, lazily.
 Tests that exercise a real fit call ``pytest.importorskip("scipy")``
 themselves so the absence test below still runs (and passes) without the
 extra installed.
@@ -10,7 +10,6 @@ extra installed.
 from __future__ import annotations
 
 import os
-import sys
 
 import numpy as np
 import pandas as pd
@@ -479,7 +478,7 @@ def test_fit_diagnostics_before_fit_raises():
 
 @pytest.mark.unit
 def test_auto_arima_selects_order():
-    """auto=True runs AutoARIMA and stores a valid order."""
+    """auto=True runs the order search and stores a valid order."""
     pytest.importorskip("scipy")
 
     rng = np.random.default_rng(8)
@@ -701,7 +700,6 @@ def test_biogas_auto_arima_matches_statsmodels():
     """auto=True order selection on biogas data matches statsmodels predictions."""
     pytest.importorskip("scipy")
     pytest.importorskip("statsmodels")
-    pytest.importorskip("statsforecast")
     import warnings
 
     from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -814,10 +812,10 @@ def test_auto_arima_d_in_zero_or_one():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("key", ["seasonal", "ic"])
-def test_auto_kwargs_reject_keywords_the_class_sets(key):
-    """The search is always non-seasonal and AIC-ranked, so these are refused."""
-    with pytest.raises(FlexConfigError, match=rf"\['{key}'\].*drop them"):
+@pytest.mark.parametrize("key", ["seasonal", "ic", "stepwise"])
+def test_auto_kwargs_reject_unknown_options(key):
+    """The search is always non-seasonal and AIC-ranked; other options are refused."""
+    with pytest.raises(FlexConfigError, match=rf"does not accept \['{key}'\]"):
         ArimaRegressor(auto=True, **{key: True})
 
 
@@ -833,29 +831,11 @@ def test_extra_keywords_require_auto(kwargs):
 
 
 @pytest.mark.unit
-def test_auto_arima_d_greater_than_one_raises(monkeypatch):
-    """auto=True with a search that selects d>1 raises FlexConfigError."""
-    pytest.importorskip("scipy")
-
-    n = 60
-    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
-    y = pd.DataFrame({"y": np.random.default_rng(0).normal(size=n)}, index=idx)
-
-    # auto_select_order is monkeypatched to return d=2
-    from flexparameterize.regression import arima as arima_module
-
-    original = arima_module.auto_select_order
-
-    def _fake_auto(*_args, **_kwargs):
-        return (1, 2, 1)
-
-    monkeypatch.setattr(arima_module, "auto_select_order", _fake_auto)
-    try:
-        regressor = ArimaRegressor(auto=True, max_ar_persistence=None)
-        with pytest.raises(FlexConfigError, match="d=2"):
-            regressor.fit(pd.DataFrame(index=idx), y)
-    finally:
-        monkeypatch.setattr(arima_module, "auto_select_order", original)
+@pytest.mark.parametrize("kwargs", [{"max_d": 2}, {"d": 2}])
+def test_auto_arima_d_greater_than_one_raises(kwargs):
+    """auto=True refuses a search that could reach d>1, before any fit."""
+    with pytest.raises(FlexConfigError, match="at most d=1"):
+        ArimaRegressor(auto=True, **kwargs)
 
 
 @pytest.mark.unit
@@ -1196,24 +1176,6 @@ def test_sufficiently_sized_order_still_fits():
 
 
 # -- FlexConfigError paths that were not previously exercised ------------------
-
-
-@pytest.mark.unit
-def test_statsforecast_absent_raises(monkeypatch):
-    """With statsforecast unimportable, auto=True raises FlexConfigError."""
-    monkeypatch.setitem(sys.modules, "statsforecast", None)
-    monkeypatch.setitem(sys.modules, "statsforecast.models", None)
-
-    y = pd.DataFrame(
-        {"y": [1.0, 2.0, 3.0]}, index=pd.date_range("2024-01-01", periods=3, freq="1h")
-    )
-    with pytest.raises(FlexConfigError, match=r"flex-pse\[parameterize\]"):
-        ArimaRegressor(auto=True).fit(
-            pd.DataFrame(index=y.index),
-            y,
-            input_units={},
-            output_units="m^3/hr",
-        )
 
 
 @pytest.mark.unit
@@ -1822,7 +1784,7 @@ def test_both_output_error_backends_beat_equation_error_on_a_d1_ramp():
 
 @pytest.mark.unit
 def test_fit_does_not_hide_warnings_from_the_refit(monkeypatch):
-    """Only the AutoARIMA search is filtered; the refit's warnings surface."""
+    """fit() does not filter the warnings its least-squares fit raises."""
     pytest.importorskip("scipy")
     import warnings
 
