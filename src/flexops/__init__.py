@@ -42,6 +42,7 @@ from flexops.unit_models.electrolyzer import ElectrolyzerTechnology, ProductPhas
 from flexops.unit_models.mixer import MixerTemperatureRule
 from flexops.unit_models.powergeneration.boiler import BoilerType
 from flexops.unit_models.powergeneration.combustor import CombustorPowerRelation
+from flexops.unit_models.storage.battery import SOCBasis
 
 __version__ = _dist_version("flex-pse")
 
@@ -76,6 +77,7 @@ __all__ = [
     "ReverseOsmosis",
     "SIDOBlock",
     "SISOBlock",
+    "SOCBasis",
     "SimpleAqueousFlow",
     "SimpleGasFlow",
     "Splitter",

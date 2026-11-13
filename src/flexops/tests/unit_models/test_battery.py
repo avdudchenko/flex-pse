@@ -12,7 +12,7 @@ from pyomo.repn import generate_standard_repn
 
 from flexcore.config.schema import UnitCommitmentConfig
 from flexcore.exceptions import FlexConfigError
-from flexops import SimpleAqueousFlow, build_model, emit_model
+from flexops import SimpleAqueousFlow, SOCBasis, build_model, emit_model
 from flexops.core.compare import assert_models_equivalent
 from flexops.core.time_block import TimeBlock
 from flexops.costing import FlexCosting
@@ -116,7 +116,10 @@ def test_soc_constraint_bodies():
     power_charge = [5.0, 0.0, 0.0, 2.0]
     power_discharge = [0.0, 3.0, 1.0, 0.0]
     charge = []
-    previous = 5.0  # charge_init == initial_soc(0.5) * energy_capacity(10).
+    # charge_init == initial_soc(0.5) * soh(0.85) * energy_capacity(10): the
+    # default available SOC basis measures SOC against the usable capacity.
+    previous = 4.25
+    assert pyo.value(unit.charge_init) == pytest.approx(previous)
     for t in range(4):
         previous = previous + dt_hr * (0.9 * power_charge[t] - power_discharge[t] / 0.8)
         charge.append(previous)
@@ -163,7 +166,10 @@ def test_charge_balance_includes_leakage():
     power_charge = [5.0, 0.0, 0.0, 2.0]
     power_discharge = [0.0, 3.0, 1.0, 0.0]
     charge = []
-    previous = 5.0  # charge_init == initial_soc(0.5) * energy_capacity(10).
+    # charge_init == initial_soc(0.5) * soh(0.85) * energy_capacity(10): the
+    # default available SOC basis measures SOC against the usable capacity.
+    previous = 4.25
+    assert pyo.value(unit.charge_init) == pytest.approx(previous)
     for t in range(4):
         previous = previous * (1 - 0.01 * dt_days) + dt_hr * (
             0.9 * power_charge[t] - power_discharge[t] / 0.8
@@ -180,18 +186,60 @@ def test_charge_balance_includes_leakage():
 
 
 @pytest.mark.unit
-def test_soc_limits_are_linear_rows_and_soc_reads_charge_over_energy_capacity():
-    """soc_min/soc_max bound charge through linear rows; soc is charge over energy."""
-    _, unit = _battery(4, soc_min=0.2, soc_max=0.8)
-    energy_capacity_val = pyo.value(unit.energy_capacity)
+@pytest.mark.parametrize(
+    "soc_basis, basis_fraction",
+    [(SOCBasis.AVAILABLE, 0.85), (SOCBasis.NAMEPLATE, 1.0)],
+)
+def test_soc_limits_are_linear_rows_and_soc_reads_charge_over_soc_capacity(
+    soc_basis, basis_fraction
+):
+    """soc_min/soc_max bound charge through linear rows; soc is charge over the
+    basis capacity: soh * energy_capacity (available) or energy_capacity."""
+    _, unit = _battery(4, soc_min=0.2, soc_max=0.8, soh=0.85, soc_basis=soc_basis)
+    basis = basis_fraction * pyo.value(unit.energy_capacity)
+    assert pyo.value(unit.soc_capacity) == pytest.approx(basis)
 
-    unit.charge[0].set_value(0.8 * energy_capacity_val)
+    unit.charge[0].set_value(0.8 * basis)
     assert pyo.value(unit.soc[0]) == pytest.approx(0.8)
     assert pyo.value(unit.soc_upper_limit[0].body) == pytest.approx(0.0, abs=1e-9)
 
-    unit.charge[0].set_value(0.2 * energy_capacity_val)
+    unit.charge[0].set_value(0.2 * basis)
     assert pyo.value(unit.soc[0]) == pytest.approx(0.2)
     assert pyo.value(unit.soc_lower_limit[0].body) == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.unit
+def test_available_basis_reads_full_at_full_usable_capacity():
+    """On the default basis a degraded battery still reaches soc = 1, and
+    initial_soc = 1 starts it at soh * energy_capacity."""
+    _, unit = _battery(4, soh=0.85, initial_soc=1.0)
+    assert unit.config.soc_basis is SOCBasis.AVAILABLE
+    assert pyo.value(unit.charge_init) == pytest.approx(8.5)
+    unit.charge[0].set_value(8.5)
+    assert pyo.value(unit.soc[0]) == pytest.approx(1.0)
+    # soc_max <= 1 of the usable capacity already caps charge at soh * E.
+    assert not hasattr(unit, "soh_capacity_limit")
+    assert not hasattr(unit, "charge_init_soh_limit")
+
+
+@pytest.mark.unit
+def test_nameplate_basis_rejects_initial_soc_above_soh():
+    """On the nameplate basis a start above soh * energy_capacity can't be held."""
+    with pytest.raises(FlexConfigError, match="initial_soc") as info:
+        _battery(4, soh=0.85, initial_soc=0.9, soc_basis=SOCBasis.NAMEPLATE)
+    assert info.value.field == "initial_soc"
+
+    _, unit = _battery(4, soh=0.85, initial_soc=0.85, soc_basis=SOCBasis.NAMEPLATE)
+    assert pyo.value(unit.charge_init) == pytest.approx(8.5)
+
+
+@pytest.mark.unit
+def test_soc_basis_survives_emit_and_rebuild():
+    """soc_basis round-trips through emit_model and build_model."""
+    m, _ = _battery(4, soc_basis=SOCBasis.NAMEPLATE)
+    rebuilt = build_model(emit_model(m))
+    assert rebuilt.unit.config.soc_basis is SOCBasis.NAMEPLATE
+    assert hasattr(rebuilt.unit, "soh_capacity_limit")
 
 
 @pytest.mark.unit
@@ -239,7 +287,19 @@ def test_battery_rows_stay_linear_when_energy_and_power_capacity_are_free():
 
 @pytest.mark.component
 @pytest.mark.needs_highs
-def test_operations_objective_is_unchanged_by_linear_formulation():
+@pytest.mark.parametrize(
+    "soc_basis, expected",
+    [
+        # Recorded from the nameplate-SOC formulation, before soc_basis
+        # existed: the nameplate basis must reproduce it exactly.
+        (SOCBasis.NAMEPLATE, 373.88880747337976),
+        # The available basis starts at initial_soc * soh * energy_capacity
+        # (42.5 kWh, not 50 kWh) under the same soh * energy_capacity
+        # ceiling, so the 7.5 kWh less stored energy costs slightly more.
+        (SOCBasis.AVAILABLE, 374.8509354623459),
+    ],
+)
+def test_operations_objective_is_unchanged_by_linear_formulation(soc_basis, expected):
     """A fixed-size arbitrage solve matches the bilinear formulation's objective."""
     from flexcore.solvers import ProblemClass, get_solver
 
@@ -248,11 +308,12 @@ def test_operations_objective_is_unchanged_by_linear_formulation():
         baseload_power_kw=100.0,
         power_charge_max=50 * pyunits.kW,
         power_discharge_max=50 * pyunits.kW,
+        soc_basis=soc_basis,
     )
     m.objective = pyo.Objective(expr=m.costing.aggregate_operating_cost)
     results = get_solver(problem_class=ProblemClass.LP, prefer="highs").solve(m)
     assert_optimal_termination(results)
-    assert pyo.value(m.objective) == pytest.approx(373.88880747337976, rel=1e-6)
+    assert pyo.value(m.objective) == pytest.approx(expected, rel=1e-6)
 
 
 @pytest.mark.component
@@ -294,8 +355,17 @@ def test_free_initial_state_unfixes_charge_init_and_registers_no_initial_state()
 
 @pytest.mark.unit
 def test_charge_init_stays_in_soc_and_soh_windows():
-    """A free charge_init obeys soc_min/soc_max and soh, like charge[t]."""
-    _, unit = _battery(4, fix_initial_state=False, soc_min=0.1, soc_max=0.9, soh=0.8)
+    """A free charge_init obeys soc_min/soc_max and soh, like charge[t]
+    (nameplate basis, where soh is a separate cap)."""
+    _, unit = _battery(
+        4,
+        fix_initial_state=False,
+        soc_min=0.1,
+        soc_max=0.9,
+        soh=0.8,
+        initial_soc=0.5,
+        soc_basis=SOCBasis.NAMEPLATE,
+    )
     capacity = pyo.value(unit.energy_capacity)
 
     def inside(con):
@@ -315,6 +385,30 @@ def test_charge_init_stays_in_soc_and_soh_windows():
         assert inside(unit.charge_init_lower_limit) is lower_ok, fraction
         assert inside(unit.charge_init_upper_limit) is upper_ok, fraction
         assert inside(unit.charge_init_soh_limit) is soh_ok, fraction
+
+
+@pytest.mark.unit
+def test_charge_init_window_scales_with_soh_on_available_basis():
+    """On the available basis the start's window is a fraction of soh * E."""
+    _, unit = _battery(4, fix_initial_state=False, soc_min=0.1, soc_max=0.9, soh=0.8)
+    usable = 0.8 * pyo.value(unit.energy_capacity)
+
+    def inside(con):
+        body = pyo.value(con.body)
+        lower, upper = pyo.value(con.lower), pyo.value(con.upper)
+        return (lower is None or body >= lower - 1e-9) and (
+            upper is None or body <= upper + 1e-9
+        )
+
+    for fraction, lower_ok, upper_ok in [
+        (0.05, False, True),
+        (0.5, True, True),
+        (0.9, True, True),
+        (0.95, True, False),
+    ]:
+        unit.charge_init.set_value(fraction * usable)
+        assert inside(unit.charge_init_lower_limit) is lower_ok, fraction
+        assert inside(unit.charge_init_upper_limit) is upper_ok, fraction
 
 
 @pytest.mark.unit
@@ -389,8 +483,11 @@ def test_charge_registered_as_output_io_variable():
 
 @pytest.mark.unit
 def test_soh_capacity_limit_constraint_body():
-    """soh_capacity_limit bounds charge by soh * energy_capacity, not by soc_max."""
-    _, unit = _battery(4, soh=0.6, soc_max=1.0)
+    """On the nameplate basis soh_capacity_limit bounds charge by soh *
+    energy_capacity, not by soc_max."""
+    _, unit = _battery(
+        4, soh=0.6, soc_max=1.0, initial_soc=0.5, soc_basis=SOCBasis.NAMEPLATE
+    )
     energy_capacity_val = pyo.value(unit.energy_capacity)
 
     unit.charge[0].set_value(0.6 * energy_capacity_val)

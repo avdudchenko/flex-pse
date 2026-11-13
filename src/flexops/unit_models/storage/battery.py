@@ -20,18 +20,26 @@ fixed at the constructor value by default (operations mode); a
   ``power_charge_max``/``power_discharge_max`` (the semicontinuous link needs a
   finite bound), which -- like the non-UC default case -- falls back to a 1C
   rate (the whole energy capacity in one hour) when neither is given.
-* ``soc[t]`` is an Expression, ``charge[t] / energy_capacity``. ``soc_min``/``soc_max``
-  bound ``charge[t]`` through the linear rows ``soc_lower_limit`` and
-  ``soc_upper_limit``, so the unit stays linear when ``energy_capacity`` is free.
+* ``soc[t]`` is an Expression, ``charge[t] / soc_capacity``. ``soc_basis``
+  picks what SOC is a fraction of. ``SOCBasis.AVAILABLE`` (the default, and
+  what a BMS reports) measures it against the usable capacity,
+  ``soc_capacity = soh * energy_capacity``, so a degraded battery still reads
+  0-100% and ``soc_min``/``soc_max``/``initial_soc`` scale with ``soh``.
+  ``SOCBasis.NAMEPLATE`` measures it against ``energy_capacity``; ``soh`` then
+  caps the charge separately through ``soh_capacity_limit`` and
+  ``charge_init_soh_limit``, and an ``initial_soc`` above ``soh`` is rejected
+  at build. ``soc_min``/``soc_max`` bound ``charge[t]`` through the rows
+  ``soc_lower_limit`` and ``soc_upper_limit``, linear while ``soh`` is fixed,
+  so the unit stays linear when ``energy_capacity`` is free.
 * ``power_capacity`` (kW) is the fixable power sizing ``Var``, sized independently
   of ``energy_capacity``. It is fixed at, and bounded above by, the larger of the
   two power limits.
 * ``charge_init`` is a scalar ``Var``, not a ``Param``, so it can be swept or
   solved for in place. ``fix_initial_state=True`` fixes it and registers it as
   rolling-horizon initial state; ``False`` leaves it free and registers
-  nothing. Either way ``charge_init_lower_limit``, ``charge_init_upper_limit``
-  and ``charge_init_soh_limit`` hold
-  it to the same SOC and state-of-health windows as ``charge[t]``.
+  nothing. Either way ``charge_init_lower_limit`` and
+  ``charge_init_upper_limit`` (plus ``charge_init_soh_limit`` on the nameplate
+  basis) hold it to the same windows as ``charge[t]``.
   ``cyclic=True`` independently adds ``charge[N-1] >= charge_init``.
 * ``charge_balance`` covers **every** ``t``, including ``t=0`` (referencing
   ``charge_init`` in place of ``charge[t-1]`` at the boundary), rather than
@@ -45,7 +53,7 @@ fixed at the constructor value by default (operations mode); a
   physical backing. Folding ``t=0`` into ``charge_balance`` closes that hole
   and drops the need for a separate, differently-named initial-condition
   constraint.
-* ``soh`` (state of health) and ``soh_capacity_limit`` are **not** part of the
+* ``soh`` (state of health) and its limits are **not** part of the
   base battery spec; added at explicit user request as a v0 placeholder ahead of any
   future degradation-modeling work. ``soh`` is fixed at the constructor
   value (default 0.85, mid-life) like ``energy_capacity``.
@@ -81,7 +89,8 @@ Usage::
     >>> m.battery = BatteryModel(energy_capacity=10 * pyunits.kWh)  # doctest: +SKIP
 
 Config: see ``energy_capacity``, ``power_charge_max``/``power_discharge_max``,
-``eta_charge``/``eta_discharge``, ``soc_min``/``soc_max``, ``initial_soc``, ``soh``,
+``eta_charge``/``eta_discharge``, ``soc_basis``, ``soc_min``/``soc_max``,
+``initial_soc``, ``soh``,
 ``charge_leakage_rate``, ``fix_initial_state``, ``cyclic`` below, plus the inherited
 ``relaxation``/``unit_commitment``/``external_dispatch``/``costing_package``.
 
@@ -89,6 +98,8 @@ Config: see ``energy_capacity``, ``power_charge_max``/``power_discharge_max``,
 (discharge exports power); any facility-level "net draw >= 0" constraint
 belongs at the plant/costing level, not here.
 """
+
+import enum
 
 import pyomo.environ as pyo
 from idaes.core import declare_process_block_class
@@ -101,6 +112,15 @@ from flexcore.exceptions import FlexConfigError
 from flexops.core.ops_block import OpsBlockData
 from flexops.logic._records import suppress_logic_records
 from flexops.logic.status import add_status
+
+
+class SOCBasis(enum.StrEnum):
+    """What a :class:`BatteryModel`'s state of charge is a fraction of."""
+
+    AVAILABLE = "available"
+    """The usable capacity, ``soh * energy_capacity``: what a BMS reports."""
+    NAMEPLATE = "nameplate"
+    """The rated ``energy_capacity``; ``soh`` caps the charge separately."""
 
 
 def _fraction_domain(value):
@@ -186,12 +206,23 @@ class BatteryModelData(OpsBlockData):
         ),
     )
     CONFIG.declare(
+        "soc_basis",
+        ConfigValue(
+            default=SOCBasis.AVAILABLE,
+            domain=SOCBasis,
+            description="What soc, soc_min, soc_max and initial_soc are "
+            "fractions of: SOCBasis.AVAILABLE (default) is the usable capacity "
+            "soh * energy_capacity, as a BMS reports it; SOCBasis.NAMEPLATE is "
+            "the rated energy_capacity, with soh capping the charge separately.",
+        ),
+    )
+    CONFIG.declare(
         "soc_min",
         ConfigValue(
             default=0.0,
             domain=_fraction_domain,
-            description="Minimum state of charge, a fraction of energy capacity "
-            "in [0, 1].",
+            description="Minimum state of charge in [0, 1], a fraction of "
+            "the soc_basis capacity.",
         ),
     )
     CONFIG.declare(
@@ -199,8 +230,8 @@ class BatteryModelData(OpsBlockData):
         ConfigValue(
             default=1.0,
             domain=_fraction_domain,
-            description="Maximum state of charge, a fraction of energy capacity "
-            "in [0, 1].",
+            description="Maximum state of charge in [0, 1], a fraction of "
+            "the soc_basis capacity.",
         ),
     )
     CONFIG.declare(
@@ -208,9 +239,10 @@ class BatteryModelData(OpsBlockData):
         ConfigValue(
             default=0.5,
             domain=_fraction_domain,
-            description="Initial state of charge, a fraction of energy capacity in "
-            "[0, 1], before step 0's flows; sets the charge_init Var "
-            "(rolling-horizon state).",
+            description="Initial state of charge in [0, 1], a fraction of the "
+            "soc_basis capacity, before step 0's flows; sets the charge_init "
+            "Var (rolling-horizon state). On the nameplate basis it may not "
+            "exceed soh.",
         ),
     )
     CONFIG.declare(
@@ -270,6 +302,18 @@ class BatteryModelData(OpsBlockData):
                 "default to a 1C rate, energy capacity per hour).",
                 field="power_discharge_max" if given[0] else "power_charge_max",
                 value=None,
+            )
+
+        available_basis = self.config.soc_basis is SOCBasis.AVAILABLE
+        if not available_basis and self.config.initial_soc > self.config.soh:
+            raise FlexConfigError(
+                f"initial_soc ({self.config.initial_soc}) exceeds soh "
+                f"({self.config.soh}): on the nameplate SOC basis a battery at "
+                "this state of health can hold at most soh of its energy "
+                "capacity. Lower initial_soc, or use SOCBasis.AVAILABLE to "
+                "give SOC as a fraction of the usable capacity.",
+                field="initial_soc",
+                value=self.config.initial_soc,
             )
 
         energy_capacity_val = pyo.value(
@@ -367,7 +411,10 @@ class BatteryModelData(OpsBlockData):
             doc="Stored energy content.",
         )
 
-        initial_charge_val = self.config.initial_soc * energy_capacity_val
+        basis_capacity_val = energy_capacity_val * (
+            self.config.soh if available_basis else 1.0
+        )
+        initial_charge_val = self.config.initial_soc * basis_capacity_val
         # A fixed Var, not a Param, so a sweep can set it and a scenario can
         # unfix it and solve for the start in place.
         start = self.declare_process_parameter(
@@ -461,18 +508,27 @@ class BatteryModelData(OpsBlockData):
         soc_max = self.config.soc_max
 
         @self.Expression(
-            tb.time_index, doc="State of charge, charge[t] / energy_capacity."
+            doc="Capacity SOC is a fraction of: soh * energy_capacity on the "
+            "available basis, energy_capacity on the nameplate basis."
+        )
+        def soc_capacity(b):
+            if available_basis:
+                return b.soh * b.energy_capacity
+            return b.energy_capacity
+
+        @self.Expression(
+            tb.time_index, doc="State of charge, charge[t] / soc_capacity."
         )
         def soc(b, t):
-            return b.charge[t] / b.energy_capacity
+            return b.charge[t] / b.soc_capacity
 
-        @self.Constraint(tb.time_index, doc="charge[t] >= soc_min * energy_capacity.")
+        @self.Constraint(tb.time_index, doc="charge[t] >= soc_min * soc_capacity.")
         def soc_lower_limit(b, t):
-            return b.charge[t] >= soc_min * b.energy_capacity
+            return b.charge[t] >= soc_min * b.soc_capacity
 
-        @self.Constraint(tb.time_index, doc="charge[t] <= soc_max * energy_capacity.")
+        @self.Constraint(tb.time_index, doc="charge[t] <= soc_max * soc_capacity.")
         def soc_upper_limit(b, t):
-            return b.charge[t] <= soc_max * b.energy_capacity
+            return b.charge[t] <= soc_max * b.soc_capacity
 
         # The start obeys the same windows as charge[t]. Built whether or not
         # charge_init is fixed: once it is unfixed, a start above the chosen
@@ -480,27 +536,31 @@ class BatteryModelData(OpsBlockData):
         # Two rows, not one ranged inequality: energy_capacity is a Var, and
         # a ranged row with Var bounds cannot be sent to a solver once the
         # design mode unfixes it.
-        @self.Constraint(doc="charge_init >= soc_min * energy_capacity.")
+        @self.Constraint(doc="charge_init >= soc_min * soc_capacity.")
         def charge_init_lower_limit(b):
-            return b.charge_init >= soc_min * b.energy_capacity
+            return b.charge_init >= soc_min * b.soc_capacity
 
-        @self.Constraint(doc="charge_init <= soc_max * energy_capacity.")
+        @self.Constraint(doc="charge_init <= soc_max * soc_capacity.")
         def charge_init_upper_limit(b):
-            return b.charge_init <= soc_max * b.energy_capacity
+            return b.charge_init <= soc_max * b.soc_capacity
 
-        @self.Constraint(doc="charge_init <= soh * energy_capacity.")
-        def charge_init_soh_limit(b):
-            return b.charge_init <= b.soh * b.energy_capacity
+        if not available_basis:
+            # On the available basis soc_capacity already is soh *
+            # energy_capacity and soc_max <= 1, so these would be redundant.
+            @self.Constraint(doc="charge_init <= soh * energy_capacity.")
+            def charge_init_soh_limit(b):
+                return b.charge_init <= b.soh * b.energy_capacity
 
-        @self.Constraint(
-            tb.time_index,
-            doc="State-of-health limit: charge[t] <= soh * "
-            "energy_capacity. Independent of soc_max -- soh models capacity fade "
-            "from degradation, while soc_max is an operational headroom "
-            "fraction of nameplate energy capacity.",
-        )
-        def soh_capacity_limit(b, t):
-            return b.charge[t] <= b.soh * b.energy_capacity
+            @self.Constraint(
+                tb.time_index,
+                doc="State-of-health limit: charge[t] <= soh * "
+                "energy_capacity. Independent of soc_max on the nameplate "
+                "basis -- soh models capacity fade from degradation, while "
+                "soc_max is an operational headroom fraction of nameplate "
+                "energy capacity.",
+            )
+            def soh_capacity_limit(b, t):
+                return b.charge[t] <= b.soh * b.energy_capacity
 
         if self.config.unit_commitment.status:
             # unit_commitment.status rebuilds this status; it is not a spec element.
